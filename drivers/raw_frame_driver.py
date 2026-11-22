@@ -105,15 +105,27 @@ class RawFrameDriver(DisplayDriver):
         celsius: bool,
         hour12: bool,
         trainer_name: str,
+        weather: dict | None = None,
     ) -> bool:
-        """Sync city/key/units to ESP8266 so autonomous offline weather matches PC settings."""
-        params = urllib.parse.urlencode({
+        """Sync city/key/units (+ optional weather snapshot) to ESP8266 for offline persistence."""
+        query: dict[str, object] = {
             "city": city or "Paracas",
             "key": weatherkey or "",
             "c": 1 if celsius else 0,
             "h12": 1 if hour12 else 0,
             "name": trainer_name or "POKEGEAR",
-        })
+        }
+        if weather and weather.get("temp") is not None:
+            query["temp"] = f"{float(weather['temp']):.1f}"
+            if weather.get("humidity") is not None:
+                query["hum"] = int(weather["humidity"])
+            if weather.get("description"):
+                query["desc"] = str(weather["description"])
+            if weather.get("city"):
+                query["wcity"] = str(weather["city"])
+            if weather.get("updated_hm"):
+                query["hm"] = str(weather["updated_hm"])
+        params = urllib.parse.urlencode(query)
         with self._lock:
             try:
                 self._request("GET", f"/offline_cfg?{params}")

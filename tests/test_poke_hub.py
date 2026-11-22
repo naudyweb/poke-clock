@@ -179,6 +179,37 @@ class TestPokeHub(unittest.TestCase):
         self.assertLess(len(strip_jpg), len(full_jpg))
         self.assertLess(len(full_jpg), 23500)
 
+    def test_raw_driver_sync_offline_config_includes_weather_snapshot(self) -> None:
+        from drivers.raw_frame_driver import RawFrameDriver
+
+        drv = RawFrameDriver("127.0.0.1")
+        captured: list[tuple[str, str]] = []
+        drv._request = lambda method, path, **kwargs: (captured.append((method, path)), b'{"ok":true}')[1]  # type: ignore[method-assign]
+
+        ok = drv.sync_offline_config(
+            city="Paracas",
+            weatherkey="testkey",
+            celsius=True,
+            hour12=True,
+            trainer_name="POKEGEAR",
+            weather={
+                "city": "Paracas",
+                "temp": 23.4,
+                "humidity": 78,
+                "description": "cielo claro",
+                "updated_hm": "01:15",
+            },
+        )
+        self.assertTrue(ok)
+        self.assertEqual(len(captured), 1)
+        method, path = captured[0]
+        self.assertEqual(method, "GET")
+        self.assertIn("/offline_cfg?", path)
+        self.assertIn("temp=23.4", path)
+        self.assertIn("hum=78", path)
+        self.assertIn("wcity=Paracas", path)
+        self.assertIn("hm=01%3A15", path)
+
 
 if __name__ == "__main__":
     unittest.main()

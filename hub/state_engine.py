@@ -265,6 +265,7 @@ def fetch_weather(city: str, api_key: str) -> dict | None:
 
     w0 = (cur.get("weather") or [{}])[0]
     return {
+        "query_city": city,
         "city": cur.get("name") or city,
         "temp": float(cur["main"]["temp"]),
         "humidity": int(cur["main"]["humidity"]),
@@ -484,14 +485,21 @@ class PokeHubEngine:
         self._wake.set()
         return self.get_status()
 
-    def _sync_offline_config(self) -> None:
+    def _sync_offline_config(self, include_weather: bool = True) -> None:
         if isinstance(self.driver, RawFrameDriver):
+            city = str(self.config.get("city") or "Paracas")
+            weather_snapshot = None
+            if include_weather and self.weather_data:
+                w_city = str(self.weather_data.get("query_city") or self.weather_data.get("city") or "")
+                if not w_city or w_city.strip().lower() == city.strip().lower():
+                    weather_snapshot = self.weather_data
             self.driver.sync_offline_config(
-                city=str(self.config.get("city") or "Paracas"),
+                city=city,
                 weatherkey=str(self.config.get("weatherkey") or ""),
                 celsius=bool(self.config.get("celsius", True)),
                 hour12=bool(self.config.get("hour12", True)),
                 trainer_name=str(self.config.get("trainer_name") or "POKEGEAR"),
+                weather=weather_snapshot,
             )
 
     def _in_night_window(self, now: datetime) -> bool:
@@ -682,6 +690,8 @@ class PokeHubEngine:
                 self.weather_data = w
                 self._render_card_locked("weather")
                 self._render_card_locked("clock")
+        if w:
+            self._sync_offline_config(include_weather=True)
 
     def _push_now(self, force: bool = False) -> dict:
         now_mono = time.monotonic()
