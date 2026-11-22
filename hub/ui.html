@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Poké-Hub · Control de Pantalla</title>
+<style>
+  :root {
+    --cream: #f8f8f0;
+    --ink: #181820;
+    --muted: #5a6470;
+    --green: #24a848;
+    --blue: #2868c8;
+    --gold: #f8b800;
+    --red: #e03838;
+    --card: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 18px;
+    background: var(--cream);
+    color: var(--ink);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    display: flex;
+    justify-content: center;
+  }
+  .wrap { width: 100%; max-width: 840px; }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    border: 4px solid var(--ink);
+    background: var(--card);
+    padding: 12px 16px;
+    box-shadow: 4px 4px 0 #c8d0c0;
+    margin-bottom: 16px;
+  }
+  .header h1 { margin: 0; font-size: 17px; letter-spacing: 1px; }
+  .header-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .domain-chip {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 8px;
+    border: 2px solid var(--ink);
+    background: var(--cream);
+    color: var(--blue);
+    text-decoration: none;
+  }
+  .badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 8px;
+    border: 2px solid var(--ink);
+    background: var(--green);
+    color: #fff;
+  }
+  .badge.off { background: var(--red); }
+  .grid {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    border: 3px solid var(--ink);
+    background: var(--card);
+    padding: 14px;
+    box-shadow: 4px 4px 0 #c8d0c0;
+    margin-bottom: 16px;
+  }
+  .panel h2 {
+    margin: 0 0 10px 0;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--blue);
+    border-bottom: 2px solid #e4e8dc;
+    padding-bottom: 6px;
+  }
+  .screen-frame {
+    width: 246px;
+    height: 246px;
+    margin: 0 auto 10px auto;
+    border: 3px solid var(--ink);
+    background: var(--cream);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .screen-frame img {
+    width: 240px;
+    height: 240px;
+    image-rendering: pixelated;
+    display: block;
+  }
+  .meta { font-size: 11.5px; color: var(--muted); text-align: center; line-height: 1.5; }
+  .btn-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  button {
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 12.5px;
+    padding: 9px 10px;
+    border: 2px solid var(--ink);
+    background: var(--cream);
+    color: var(--ink);
+    cursor: pointer;
+    box-shadow: 2px 2px 0 var(--ink);
+    transition: transform 0.05s;
+  }
+  button:active { transform: translate(2px, 2px); box-shadow: none; }
+  button.active { background: var(--gold); }
+  button.primary { background: var(--blue); color: #fff; }
+  button.auto { background: var(--green); color: #fff; grid-column: span 2; }
+  .toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px dashed #d8dfd0;
+    font-size: 12.5px;
+    gap: 10px;
+  }
+  .toggle-row:last-child { border-bottom: none; }
+  input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--green); cursor: pointer; }
+  input[type="range"] { width: 100%; accent-color: var(--blue); }
+  input[type="text"], input[type="number"], select {
+    width: 100%;
+    font-family: inherit;
+    font-size: 12.5px;
+    padding: 6px 8px;
+    border: 2px solid var(--ink);
+    background: var(--cream);
+    margin-bottom: 8px;
+  }
+  .toggle-row select, .toggle-row input[type="text"], .toggle-row input[type="number"] {
+    width: 155px;
+    margin-bottom: 0;
+  }
+  .palettes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px; }
+  .pal-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    padding: 8px;
+    text-align: left;
+  }
+  .swatch {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--ink);
+    flex-shrink: 0;
+  }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .toast {
+    position: fixed; bottom: 16px; right: 16px;
+    background: var(--ink); color: #fff; padding: 8px 14px;
+    font-size: 12px; display: none; border: 2px solid var(--gold); z-index: 10;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <h1>POKE-HUB · CONTROL 100% EN PC</h1>
+    <div class="header-right">
+      <a id="domainChip" class="domain-chip" href="http://pokeclock.local">pokeclock.local</a>
+      <span id="statusBadge" class="badge">CONECTANDO</span>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- Left column -->
+    <div>
+      <div class="panel">
+        <h2>En Pantalla Ahora</h2>
+        <div class="screen-frame">
+          <img id="liveImg" src="/api/preview/active" alt="Live screen">
+        </div>
+        <div class="meta" id="liveMeta">Cargando...</div>
+      </div>
+
+      <div class="panel">
+        <h2>Brillo y Rotación</h2>
+        <div style="font-size:12px;margin-bottom:4px;">Brillo: <b id="brightVal">95</b>%</div>
+        <input type="range" id="brightRange" min="0" max="100" value="95">
+        <div class="two" style="margin-top:8px;">
+          <button onclick="setRot(0)">Rot 0°</button>
+          <button onclick="setRot(2)">Rot 180°</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Enviar Aviso Pokémon</h2>
+        <input type="text" id="nTitle" placeholder="Título (ej. BUILD OK)">
+        <input type="text" id="nMsg" placeholder="Mensaje en pantalla...">
+        <div class="two">
+          <select id="nPoke">
+            <option value="pikachu">Pikachu</option>
+            <option value="charmander">Charmander</option>
+            <option value="squirtle">Squirtle</option>
+            <option value="bulbasaur">Bulbasaur</option>
+            <option value="gengar">Gengar</option>
+            <option value="snorlax">Snorlax</option>
+            <option value="jigglypuff">Jigglypuff</option>
+          </select>
+          <input type="number" id="nTtl" value="12" min="2" max="120" title="Duración (s)">
+        </div>
+        <button class="primary" style="width:100%;" onclick="sendNotify()">Enviar Aviso Ahora</button>
+      </div>
+    </div>
+
+    <!-- Right column -->
+    <div>
+      <div class="panel">
+        <h2>Cambio Instantáneo (~150 ms)</h2>
+        <div class="btn-row">
+          <button id="btn-clock" onclick="showCard('clock')">Poké Clock</button>
+          <button id="btn-weather" onclick="showCard('weather')">Poké Weather</button>
+          <button id="btn-gemini" onclick="showCard('gemini')">Gemini Tokens</button>
+          <button id="btn-spotify" onclick="showCard('spotify')">Spotify</button>
+          <button id="btn-auto" class="auto" onclick="setAuto()">Modo Automático</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Paleta de Colores Retro</h2>
+        <div class="palettes">
+          <button class="pal-btn" id="pal-gbc_classic" onclick="setPalette('gbc_classic')">
+            <span class="swatch" style="background:#f8f8f0;"></span>GBC Oro/Plata
+          </button>
+          <button class="pal-btn" id="pal-gbc_dark" onclick="setPalette('gbc_dark')">
+            <span class="swatch" style="background:#101422;"></span>Cristal Nocturno
+          </button>
+          <button class="pal-btn" id="pal-gb_green" onclick="setPalette('gb_green')">
+            <span class="swatch" style="background:#9bbc0f;"></span>Game Boy DMG
+          </button>
+          <button class="pal-btn" id="pal-pokedex_red" onclick="setPalette('pokedex_red')">
+            <span class="swatch" style="background:#e03838;"></span>Pokédex Rojo
+          </button>
+        </div>
+        <div class="toggle-row">
+          <span>Paleta oscura automática de noche</span>
+          <input type="checkbox" id="autoNightPal" onchange="saveCustom()">
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Pokémon por Pantalla</h2>
+        <div class="toggle-row"><span>Reloj (Día)</span><select id="sp-clock_day" onchange="saveSprites()"></select></div>
+        <div class="toggle-row"><span>Reloj (Noche)</span><select id="sp-clock_night" onchange="saveSprites()"></select></div>
+        <div class="toggle-row"><span>Clima</span><select id="sp-weather" onchange="saveSprites()"></select></div>
+        <div class="toggle-row"><span>Gemini Tokens</span><select id="sp-gemini" onchange="saveSprites()"></select></div>
+        <div class="toggle-row"><span>Spotify</span><select id="sp-spotify" onchange="saveSprites()"></select></div>
+      </div>
+
+      <div class="panel">
+        <h2>Rotación, Región y Modo Nocturno</h2>
+        <div class="toggle-row"><span>Poké Clock en rotación</span><input type="checkbox" id="en-clock" onchange="saveCustom()"></div>
+        <div class="toggle-row"><span>Poké Weather en rotación</span><input type="checkbox" id="en-weather" onchange="saveCustom()"></div>
+        <div class="toggle-row"><span>Gemini Tokens en rotación</span><input type="checkbox" id="en-gemini" onchange="saveCustom()"></div>
+        <div class="toggle-row"><span><b>Prioridad exclusiva Spotify</b></span><input type="checkbox" id="en-spprio" onchange="saveCustom()"></div>
+        <div class="toggle-row">
+          <span>Intervalo rotación</span>
+          <select id="rotInt" onchange="saveCustom()">
+            <option value="5">5 seg</option>
+            <option value="10">10 seg</option>
+            <option value="12">12 seg</option>
+            <option value="20">20 seg</option>
+            <option value="30">30 seg</option>
+            <option value="60">60 seg</option>
+          </select>
+        </div>
+        <div class="toggle-row"><span>Nombre en reloj</span><input type="text" id="trainerName" placeholder="POKEGEAR" maxlength="10"></div>
+        <div class="toggle-row"><span>Ciudad (Clima)</span><input type="text" id="cityName" placeholder="Paracas"></div>
+        <div class="toggle-row"><span>Temperatura en °C</span><input type="checkbox" id="useCelsius" onchange="saveCustom()"></div>
+        <div class="toggle-row"><span>Formato 12 horas (AM/PM)</span><input type="checkbox" id="useHour12" onchange="saveCustom()"></div>
+        <div class="toggle-row"><span>Modo nocturno (baja brillo)</span><input type="checkbox" id="nightMode" onchange="saveCustom()"></div>
+        <div class="toggle-row">
+          <span>Horario nocturno / Brillo</span>
+          <div style="display:flex;gap:4px;width:155px;">
+            <input type="number" id="nightStart" min="0" max="23" value="23" style="width:48px;" title="Hora inicio">
+            <input type="number" id="nightEnd" min="0" max="23" value="7" style="width:48px;" title="Hora fin">
+            <input type="number" id="nightBright" min="1" max="100" value="18" style="width:52px;" title="Brillo %">
+          </div>
+        </div>
+        <button class="primary" style="width:100%;margin-top:8px;" onclick="saveCustom()">Guardar Personalización</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const SPRITES = [
+  ['pikachu', 'Pikachu'], ['charmander', 'Charmander'], ['squirtle', 'Squirtle'],
+  ['bulbasaur', 'Bulbasaur'], ['gengar', 'Gengar'], ['snorlax', 'Snorlax'], ['jigglypuff', 'Jigglypuff']
+];
+
+function initSpriteSelects() {
+  ['clock_day', 'clock_night', 'gemini', 'spotify', 'weather'].forEach(k => {
+    const sel = $('sp-' + k);
+    sel.innerHTML = '';
+    if (k === 'weather') {
+      const o = document.createElement('option');
+      o.value = 'auto'; o.textContent = 'Automático (clima)';
+      sel.appendChild(o);
+    }
+    SPRITES.forEach(([v, lbl]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = lbl;
+      sel.appendChild(o);
+    });
+  });
+}
+initSpriteSelects();
+
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(window._tt);
+  window._tt = setTimeout(() => el.style.display = 'none', 2000);
+}
+async function post(url, body = {}) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+async function showCard(card) {
+  const r = await post('/api/show', { card });
+  toast(r.ok ? `Mostrando ${card} (${r.pc_ms || 0} ms)` : `Error: ${r.error}`);
+  refresh();
+}
+async function setAuto() {
+  const r = await post('/api/auto');
+  toast(`Modo automático (${r.card || ''})`);
+  refresh();
+}
+async function setPalette(pal) {
+  await post('/api/config', { palette: pal });
+  toast(`Paleta: ${pal}`);
+  refresh();
+}
+async function saveSprites() {
+  await post('/api/config', {
+    sprites: {
+      clock_day: $('sp-clock_day').value,
+      clock_night: $('sp-clock_night').value,
+      weather: $('sp-weather').value,
+      gemini: $('sp-gemini').value,
+      spotify: $('sp-spotify').value
+    }
+  });
+  toast('Pokémon actualizados');
+  refresh();
+}
+async function saveCustom() {
+  await post('/api/config', {
+    enabled_cards: {
+      clock: $('en-clock').checked,
+      weather: $('en-weather').checked,
+      gemini: $('en-gemini').checked
+    },
+    spotify_priority: $('en-spprio').checked,
+    rotate_interval: parseInt($('rotInt').value, 10),
+    trainer_name: $('trainerName').value.trim() || 'POKEGEAR',
+    city: $('cityName').value.trim() || 'Paracas',
+    celsius: $('useCelsius').checked,
+    hour12: $('useHour12').checked,
+    auto_night_palette: $('autoNightPal').checked,
+    night_mode: $('nightMode').checked,
+    night_start: parseInt($('nightStart').value, 10) || 23,
+    night_end: parseInt($('nightEnd').value, 10) || 7,
+    night_brightness: parseInt($('nightBright').value, 10) || 18
+  });
+  toast('Personalización aplicada');
+  refresh();
+}
+async function setRot(val) {
+  await post('/api/rotation', { val });
+  toast(`Rotación ${val * 90}°`);
+}
+async function sendNotify() {
+  const title = $('nTitle').value.trim() || 'AVISO!';
+  const message = $('nMsg').value.trim() || 'Mensaje desde Poké-Hub';
+  const pokemon = $('nPoke').value;
+  const ttl = parseInt($('nTtl').value, 10) || 12;
+  const r = await post('/api/notify', { title, message, pokemon, ttl });
+  toast(r.ok ? `Aviso enviado (${r.pc_ms || 0} ms)` : `Error: ${r.error}`);
+  refresh();
+}
+let brightTimer = null;
+$('brightRange').addEventListener('input', e => {
+  $('brightVal').textContent = e.target.value;
+  clearTimeout(brightTimer);
+  brightTimer = setTimeout(() => post('/api/brightness', { val: parseInt(e.target.value, 10) }), 120);
+});
+
+let firstLoad = true;
+async function refresh() {
+  try {
+    const st = await (await fetch('/api/status')).json();
+    const online = st.device && st.device.online !== false;
+    $('statusBadge').textContent = `${st.driver.toUpperCase()} · ${online ? 'ONLINE' : 'OFFLINE'}`;
+    $('statusBadge').className = 'badge' + (online ? '' : ' off');
+    if (st.hub && st.hub.url) {
+      $('domainChip').href = st.hub.url;
+      $('domainChip').textContent = st.hub.url.replace(/^https?:\/\//, '');
+    }
+    $('liveImg').src = '/api/preview/active?t=' + Date.now();
+    const sp = st.spotify ? `♪ ${st.spotify.title} — ${st.spotify.artist}` : 'Spotify inactivo';
+    const ms = st.device && st.device.last_push_ms ? `${st.device.last_push_ms} ms` : '-';
+    $('liveMeta').innerHTML = `Vista: <b>${st.active_card}</b> (${st.active_reason}) · Push: <b>${ms}</b><br>${sp}`;
+    ['clock','weather','gemini','spotify'].forEach(c => {
+      $('btn-' + c).classList.toggle('active', st.active_card === c);
+    });
+    if (st.config) {
+      const c = st.config;
+      ['gbc_classic','gbc_dark','gb_green','pokedex_red'].forEach(p => {
+        $('pal-' + p).classList.toggle('active', c.palette === p);
+      });
+      $('en-clock').checked = !!c.enabled_cards.clock;
+      $('en-weather').checked = !!c.enabled_cards.weather;
+      $('en-gemini').checked = !!c.enabled_cards.gemini;
+      $('en-spprio').checked = !!c.spotify_priority;
+      $('rotInt').value = String(c.rotate_interval || 12);
+      $('useCelsius').checked = !!c.celsius;
+      $('useHour12').checked = !!c.hour12;
+      $('autoNightPal').checked = !!c.auto_night_palette;
+      $('nightMode').checked = !!c.night_mode;
+      if (firstLoad) {
+        $('trainerName').value = c.trainer_name || 'POKEGEAR';
+        $('cityName').value = c.city || 'Paracas';
+        $('nightStart').value = c.night_start ?? 23;
+        $('nightEnd').value = c.night_end ?? 7;
+        $('nightBright').value = c.night_brightness ?? 18;
+        if (c.sprites) {
+          Object.entries(c.sprites).forEach(([k, v]) => {
+            if ($('sp-' + k)) $('sp-' + k).value = v;
+          });
+        }
+        firstLoad = false;
+      }
+      if (document.activeElement !== $('brightRange')) {
+        $('brightRange').value = c.brightness ?? 95;
+        $('brightVal').textContent = c.brightness ?? 95;
+      }
+    }
+  } catch (e) {
+    $('statusBadge').textContent = 'HUB OFFLINE';
+    $('statusBadge').className = 'badge off';
+  }
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

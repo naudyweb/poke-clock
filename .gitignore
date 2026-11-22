@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# PlatformIO & local toolchain
+.pio-venv/
+firmware/.pio/
+
+# Secrets & local firmware binaries (binaries contain embedded Wi-Fi credentials)
+firmware/src/secrets.h
+firmware/*.bin
+backup-firmware/
+backup-web/
+
+# Generated preview renders
+preview.jpg
+preview_pokemon.jpg
+previews/
+
+# OS / Editor
+.DS_Store
+*.swp
+*.swo
