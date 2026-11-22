@@ -67,8 +67,8 @@ def main() -> int:
     p_rot = sub.add_parser("rotation", help="Set display rotation (0..3)")
     p_rot.add_argument("val", type=int, choices=[0, 1, 2, 3])
 
-    p_tog = sub.add_parser("toggle", help="Enable/disable a card or spotify_priority")
-    p_tog.add_argument("target", choices=["clock", "weather", "gemini", "spotify_priority"])
+    p_tog = sub.add_parser("toggle", help="Enable/disable a card, spotify_priority, or animations")
+    p_tog.add_argument("target", choices=["clock", "weather", "gemini", "spotify_priority", "animations"])
     p_tog.add_argument("state", choices=["on", "off"])
 
     p_pal = sub.add_parser("palette", help="Switch Pokémon retro color palette")
@@ -102,8 +102,8 @@ def main() -> int:
         print(json.dumps(call_api("POST", "/api/rotation", {"val": args.val}), ensure_ascii=False))
     elif args.cmd == "toggle":
         val = args.state == "on"
-        if args.target == "spotify_priority":
-            patch = {"spotify_priority": val}
+        if args.target in ("spotify_priority", "animations"):
+            patch = {args.target: val}
         else:
             patch = {"enabled_cards": {args.target: val}}
         print(json.dumps(call_api("POST", "/api/config", patch), ensure_ascii=False))

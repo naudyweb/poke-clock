@@ -156,6 +156,7 @@ def render_pixel_text(
     align: str = "left",
     gap: int = 1,
     shadow: str | None = None,
+    shadow_offset: int | None = None,
 ) -> str:
     w = pixel_text_width(text, scale, gap)
     if align == "right":
@@ -167,7 +168,8 @@ def render_pixel_text(
 
     rects: list[str] = []
     if shadow:
-        rects.append(render_pixel_text(text, x + scale, y + scale, scale, shadow, align=align, gap=gap, shadow=None))
+        off = scale if shadow_offset is None else shadow_offset
+        rects.append(render_pixel_text(text, x + off, y + off, scale, shadow, align=align, gap=gap, shadow=None))
 
     cx = start_x
     for ch in text:
@@ -241,14 +243,58 @@ def render_gbc_dialogue_box(x: int, y: int, w: int, h: int, bg: str = "#F8F8F0",
     return "".join(parts)
 
 
-def render_battle_pad(cx: int, y: int, c_top: str = "#98C078", c_mid: str = "#C8E4A8", c_bot: str = "#78A058") -> str:
+def render_battle_pad(
+    cx: int,
+    y: int,
+    c_top: str = "#98C078",
+    c_mid: str = "#C8E4A8",
+    c_bot: str = "#78A058",
+    shadow_shrink: int = 0,
+) -> str:
+    """Authentic Gen-2 elliptical pixel battle pad with clean contact shadow beneath the Pokémon."""
+    sw = max(24, 48 - shadow_shrink * 3)
     return (
         f'<rect x="{cx - 28}" y="{y}" width="56" height="4" fill="{c_top}"/>'
         f'<rect x="{cx - 36}" y="{y + 4}" width="72" height="4" fill="{c_mid}"/>'
         f'<rect x="{cx - 40}" y="{y + 8}" width="80" height="8" fill="{c_mid}"/>'
+        f'<rect x="{cx - sw // 2}" y="{y + 10}" width="{sw}" height="4" fill="{c_top}"/>'
         f'<rect x="{cx - 36}" y="{y + 16}" width="72" height="4" fill="{c_top}"/>'
         f'<rect x="{cx - 28}" y="{y + 20}" width="56" height="2" fill="{c_bot}"/>'
     )
+
+
+def render_battle_bracket(x: int, y: int, w: int, h: int, border: str, accent: str) -> str:
+    """Classic Pokémon Gold/Silver/Crystal tapered L-bracket HUD frame with right arrow tip."""
+    by = y + h
+    return (
+        f'<rect x="{x}" y="{y}" width="4" height="{h + 2}" fill="{border}"/>'
+        f'<rect x="{x}" y="{by}" width="{w}" height="4" fill="{border}"/>'
+        f'<rect x="{x + w}" y="{by - 2}" width="4" height="6" fill="{border}"/>'
+        f'<rect x="{x + w + 4}" y="{by + 2}" width="4" height="2" fill="{border}"/>'
+        f'<rect x="{x + 4}" y="{by + 4}" width="{max(8, w - 6)}" height="2" fill="{accent}"/>'
+    )
+
+
+def render_signal_bars(x: int, y: int, color: str) -> str:
+    """Authentic Gen-2 Pokégear 3-bar signal strength icon."""
+    return (
+        f'<rect x="{x}" y="{y + 6}" width="2" height="4" fill="{color}"/>'
+        f'<rect x="{x + 4}" y="{y + 3}" width="2" height="7" fill="{color}"/>'
+        f'<rect x="{x + 8}" y="{y}" width="2" height="10" fill="{color}"/>'
+    )
+
+
+def render_dotted_rule(x: int, y: int, w: int, color: str) -> str:
+    """Crisp 8-bit dotted pixel divider."""
+    parts = [f'<rect x="{px}" y="{y}" width="4" height="2" fill="{color}"/>' for px in range(x, x + w - 2, 8)]
+    return "".join(parts)
+
+
+def render_horizon_dither(y: int, color: str) -> str:
+    """Subtle Gen-2 GBC checkerboard dither accent across the top battle stage horizon."""
+    parts = [f'<rect x="{px}" y="{y}" width="4" height="2" fill="{color}"/>' for px in range(152, 236, 8)]
+    parts.extend(f'<rect x="{px}" y="{y + 2}" width="4" height="2" fill="{color}"/>' for px in range(156, 236, 8))
+    return "".join(parts)
 
 
 # ============================================================

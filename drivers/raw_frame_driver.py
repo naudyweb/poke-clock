@@ -10,6 +10,7 @@ import json
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from drivers.base import DisplayDriver
@@ -37,16 +38,17 @@ class RawFrameDriver(DisplayDriver):
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             return resp.read()
 
-    def _post_frame_multipart(self, jpg_bytes: bytes) -> bytes:
+    def _post_frame_multipart(self, jpg_bytes: bytes, x: int = 0, y: int = 0) -> bytes:
         boundary = "----PokeRawFrame7MA4YWxk"
         body = (
             f"--{boundary}\r\n"
             f'Content-Disposition: form-data; name="frame"; filename="frame.jpg"\r\n'
             f"Content-Type: image/jpeg\r\n\r\n"
         ).encode("utf-8") + jpg_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        path = "/frame" if (x == 0 and y == 0) else f"/frame?x={x}&y={y}"
         return self._request(
             "POST",
-            "/frame",
+            path,
             body=body,
             content_type=f"multipart/form-data; boundary={boundary}",
         )
@@ -72,6 +74,52 @@ class RawFrameDriver(DisplayDriver):
                 self.last_error = str(exc)
                 self._last_pushed_hash = ""
                 raise
+
+    def push_region(self, card_id: str, jpg_bytes: bytes, content_hash: str, x: int = 0, y: int = 0) -> dict:
+        """Stream a partial strip/region JPEG straight into ESP8266 RAM (~40-50ms)."""
+        with self._lock:
+            if content_hash == self._last_pushed_hash:
+                return {"skipped": True, "ms": 0}
+            t0 = time.monotonic()
+            try:
+                raw = self._post_frame_multipart(jpg_bytes, x=x, y=y)
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                self._last_pushed_hash = content_hash
+                self.last_push_ms = elapsed_ms
+                self.last_error = ""
+                try:
+                    info = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    info = {"ok": True}
+                info["pc_ms"] = elapsed_ms
+                return info
+            except Exception as exc:
+                self.last_error = str(exc)
+                self._last_pushed_hash = ""
+                raise
+
+    def sync_offline_config(
+        self,
+        city: str,
+        weatherkey: str,
+        celsius: bool,
+        hour12: bool,
+        trainer_name: str,
+    ) -> bool:
+        """Sync city/key/units to ESP8266 so autonomous offline weather matches PC settings."""
+        params = urllib.parse.urlencode({
+            "city": city or "Paracas",
+            "key": weatherkey or "",
+            "c": 1 if celsius else 0,
+            "h12": 1 if hour12 else 0,
+            "name": trainer_name or "POKEGEAR",
+        })
+        with self._lock:
+            try:
+                self._request("GET", f"/offline_cfg?{params}")
+                return True
+            except Exception:
+                return False
 
     def invalidate_cache(self) -> None:
         with self._lock:

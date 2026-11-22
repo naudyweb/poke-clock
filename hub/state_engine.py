@@ -17,6 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from drivers.raw_frame_driver import RawFrameDriver
 from drivers.stock_driver import StockFirmwareDriver
 from hub.spotify_watcher import SpotifyWatcher, query_spotify_playing
 from screens import (
+    ANIM_STRIP_H,
     DAYS_SHORT_ES,
     build_clock_svg,
     build_gemini_svg,
@@ -52,6 +54,7 @@ DEFAULT_CONFIG = {
     "rotation": 0,
     "rotate_interval": 12,
     "spotify_priority": True,
+    "animations": True,
     "sprites": {
         "clock_day": "bulbasaur",
         "clock_night": "gengar",
@@ -75,17 +78,21 @@ TRANSCRIPT_GLOBS = [
 DAY_LABELS_ES = ["L", "M", "X", "J", "V", "S", "D"]
 
 
-def render_svg_to_jpg_bytes(svg_content: str) -> bytes:
+def render_svg_to_full_and_strip(svg_content: str, strip_h: int = ANIM_STRIP_H) -> tuple[bytes, bytes]:
+    """Render a 240x240 SVG into both a full baseline JPEG and a top-strip partial JPEG."""
     with tempfile.TemporaryDirectory(prefix="poke-hub-") as tmpdir:
         tmp = Path(tmpdir)
         svg_path = tmp / "card.svg"
         png_path = tmp / "card.png"
         jpg_path = tmp / "card.jpg"
+        strip_path = tmp / "strip.jpg"
         svg_path.write_text(svg_content, encoding="utf-8")
         subprocess.run(
             ["rsvg-convert", "-w", "240", "-h", "240", str(svg_path), "-o", str(png_path)],
             check=True,
         )
+        full_data = b""
+        strip_data = b""
         for quality in ("88", "80", "70"):
             subprocess.run(
                 [
@@ -97,14 +104,21 @@ def render_svg_to_jpg_bytes(svg_content: str) -> bytes:
                     "-sampling-factor", "4:2:0",
                     "-strip",
                     "-quality", quality,
+                    "(", "+clone", "-crop", f"240x{strip_h}+0+0", "+repage", "-write", str(strip_path), "+delete", ")",
                     str(jpg_path),
                 ],
                 check=True,
             )
-            data = jpg_path.read_bytes()
-            if len(data) <= 23500:
-                return data
-        return data
+            full_data = jpg_path.read_bytes()
+            strip_data = strip_path.read_bytes()
+            if len(full_data) <= 23500 and len(strip_data) <= 23500:
+                return full_data, strip_data
+        return full_data, strip_data
+
+
+def render_svg_to_jpg_bytes(svg_content: str) -> bytes:
+    full_data, _ = render_svg_to_full_and_strip(svg_content)
+    return full_data
 
 
 def _parse_iso_local(ts: str, local_tz) -> datetime | None:
@@ -293,8 +307,12 @@ class PokeHubEngine:
         self._last_clock_hm: str = ""
         self._last_device_status: dict = {}
 
-        # Rendered JPEG cache per card
+        # Rendered JPEG cache per card + pre-rendered PC-side animation bundles
         self._jpg_cache: dict[str, tuple[str, bytes]] = {}
+        self._anim_cache: dict[str, list[dict]] = {}
+        self._last_base_key: tuple[str, str] = ("", "")
+        self._anim_idx: int = 0
+        self._last_anim_ts: float = 0.0
         self._spotify_watcher: SpotifyWatcher | None = None
         self._worker_thread: threading.Thread | None = None
 
@@ -329,6 +347,7 @@ class PokeHubEngine:
     # Lifecycle
     # ============================================================
     def start(self) -> None:
+        self._sync_offline_config()
         self.refresh_all_data()
         if self._start_watchers:
             self._spotify_watcher = SpotifyWatcher(self._on_spotify_event)
@@ -354,6 +373,7 @@ class PokeHubEngine:
                 self._render_card_locked("spotify")
             else:
                 self._jpg_cache.pop("spotify", None)
+                self._anim_cache.pop("spotify", None)
                 if self.pinned_card == "spotify":
                     self.pinned_card = None
         if changed:
@@ -397,6 +417,7 @@ class PokeHubEngine:
     def update_config(self, patch: dict) -> dict:
         re_render_weather = False
         re_render_all = False
+        sync_offline = False
         with self._lock:
             if "enabled_cards" in patch and isinstance(patch["enabled_cards"], dict):
                 for k in ("clock", "weather", "gemini"):
@@ -414,21 +435,25 @@ class PokeHubEngine:
             for key in ("rotate_interval", "brightness", "rotation", "night_start", "night_end", "night_brightness"):
                 if key in patch:
                     self.config[key] = int(patch[key])
-            for key in ("spotify_priority", "celsius", "hour12", "auto_night_palette", "night_mode"):
+            for key in ("spotify_priority", "animations", "celsius", "hour12", "auto_night_palette", "night_mode"):
                 if key in patch:
                     self.config[key] = bool(patch[key])
-                    if key in ("celsius", "hour12", "auto_night_palette"):
+                    if key in ("animations", "celsius", "hour12", "auto_night_palette"):
                         re_render_all = True
+                    if key in ("celsius", "hour12"):
+                        sync_offline = True
             for key in ("city", "weatherkey", "host", "palette", "trainer_name"):
                 if key in patch:
                     val = str(patch[key]).strip()
                     if key == "trainer_name":
                         self.config[key] = val or "POKEGEAR"
                         re_render_all = True
+                        sync_offline = True
                     elif val:
                         self.config[key] = val
                         if key in ("city", "weatherkey"):
                             re_render_weather = True
+                            sync_offline = True
                         if key == "palette":
                             re_render_all = True
 
@@ -440,11 +465,16 @@ class PokeHubEngine:
             self.driver.set_rotation(self.config["rotation"])
         if "host" in patch:
             self.driver = self._detect_driver(self.config["host"])
+            sync_offline = True
+        if sync_offline:
+            self._sync_offline_config()
         if re_render_weather:
             self._refresh_weather()
         if re_render_all:
             with self._lock:
                 self._jpg_cache.clear()
+                self._anim_cache.clear()
+                self._last_base_key = ("", "")
                 self._render_card_locked("clock")
                 self._render_card_locked("weather")
                 self._render_card_locked("gemini")
@@ -453,6 +483,16 @@ class PokeHubEngine:
             self._push_now(force=True)
         self._wake.set()
         return self.get_status()
+
+    def _sync_offline_config(self) -> None:
+        if isinstance(self.driver, RawFrameDriver):
+            self.driver.sync_offline_config(
+                city=str(self.config.get("city") or "Paracas"),
+                weatherkey=str(self.config.get("weatherkey") or ""),
+                celsius=bool(self.config.get("celsius", True)),
+                hour12=bool(self.config.get("hour12", True)),
+                trainer_name=str(self.config.get("trainer_name") or "POKEGEAR"),
+            )
 
     def _in_night_window(self, now: datetime) -> bool:
         ns = int(self.config.get("night_start", 23))
@@ -522,6 +562,7 @@ class PokeHubEngine:
                 return "notify", "notify"
             self.notify_state = None
             self._jpg_cache.pop("notify", None)
+            self._anim_cache.pop("notify", None)
 
         # 2. Manually pinned screen
         if self.pinned_card:
@@ -549,38 +590,74 @@ class PokeHubEngine:
         self._rotation_idx %= len(enabled)
         return enabled[self._rotation_idx], "rotation"
 
-    def _render_card_locked(self, card: str) -> tuple[str, bytes] | None:
-        now = datetime.now().astimezone()
-        svg: str | None = None
+    def _animations_enabled(self) -> bool:
+        # Animations run ONLY on the PC with RAM-stream firmware (never on flash-based stock firmware)
+        return bool(self.config.get("animations", True)) and isinstance(self.driver, RawFrameDriver)
+
+    @staticmethod
+    def _anim_frame_count(card: str) -> int:
+        return 6 if card == "spotify" else 4
+
+    @staticmethod
+    def _anim_interval(card: str) -> float:
+        return 0.35 if card == "spotify" else 0.65
+
+    def _build_card_svg_locked(self, card: str, now: datetime, anim_frame: int = 0) -> str | None:
         if card == "clock":
-            svg = build_clock_svg(now, self.config, self.weather_data)
-            self._last_clock_hm = now.strftime("%Y-%m-%d %H:%M")
-        elif card == "weather":
+            return build_clock_svg(now, self.config, self.weather_data, anim_frame=anim_frame)
+        if card == "weather":
             w = self.weather_data or {
                 "city": self.config["city"], "temp": 22.0, "humidity": 75, "wind_ms": 3.0,
                 "main": "Clouds", "description": "sin datos", "updated_hm": now.strftime("%H:%M"), "forecast": [],
             }
-            svg = build_weather_svg(w, self.config)
-        elif card == "gemini":
+            return build_weather_svg(w, self.config, anim_frame=anim_frame)
+        if card == "gemini":
             g = self.gemini_stats or collect_gemini_usage()
             self.gemini_stats = g
-            svg = build_gemini_svg(g, self.config)
-        elif card == "spotify" and self.spotify_track:
-            svg = build_spotify_svg(self.spotify_track, self.config)
-        elif card == "notify" and self.notify_state:
-            svg = build_notify_svg(
+            return build_gemini_svg(g, self.config, anim_frame=anim_frame)
+        if card == "spotify" and self.spotify_track:
+            return build_spotify_svg(self.spotify_track, self.config, anim_frame=anim_frame)
+        if card == "notify" and self.notify_state:
+            return build_notify_svg(
                 self.notify_state["title"],
                 self.notify_state["message"],
                 self.notify_state.get("pokemon", "pikachu"),
                 self.config,
+                anim_frame=anim_frame,
             )
+        return None
 
-        if not svg:
-            return None
-        jpg = render_svg_to_jpg_bytes(svg)
-        h = _sha256(jpg)
-        self._jpg_cache[card] = (h, jpg)
-        return h, jpg
+    def _render_card_locked(self, card: str) -> tuple[str, bytes] | None:
+        now = datetime.now().astimezone()
+        if card == "clock":
+            self._last_clock_hm = now.strftime("%Y-%m-%d %H:%M")
+
+        count = self._anim_frame_count(card) if self._animations_enabled() else 1
+        svgs: list[str] = []
+        for idx in range(count):
+            svg = self._build_card_svg_locked(card, now, anim_frame=idx)
+            if not svg:
+                return None
+            svgs.append(svg)
+
+        if len(svgs) == 1:
+            rendered = [render_svg_to_full_and_strip(svgs[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, len(svgs))) as pool:
+                rendered = list(pool.map(render_svg_to_full_and_strip, svgs))
+
+        frames: list[dict] = []
+        for full_jpg, strip_jpg in rendered:
+            frames.append({
+                "hash": _sha256(full_jpg),
+                "full": full_jpg,
+                "strip_hash": _sha256(strip_jpg),
+                "strip": strip_jpg,
+            })
+
+        self._anim_cache[card] = frames
+        self._jpg_cache[card] = (frames[0]["hash"], frames[0]["full"])
+        return frames[0]["hash"], frames[0]["full"]
 
     def _refresh_gemini(self) -> None:
         stats = collect_gemini_usage()
@@ -607,27 +684,74 @@ class PokeHubEngine:
                 self._render_card_locked("clock")
 
     def _push_now(self, force: bool = False) -> dict:
+        now_mono = time.monotonic()
         with self._lock:
-            card, reason = self.resolve_active_card_locked(time.monotonic())
+            card, reason = self.resolve_active_card_locked(now_mono)
             self.active_card = card
             self.active_reason = reason
-            cached = self._jpg_cache.get(card) or self._render_card_locked(card)
-        if not cached:
-            return {"ok": False, "error": "no frame"}
-        content_hash, jpg_bytes = cached
+            frames = self._anim_cache.get(card)
+            if not frames:
+                if not self._render_card_locked(card):
+                    return {"ok": False, "error": "no frame"}
+                frames = self._anim_cache.get(card) or []
+            if not frames:
+                return {"ok": False, "error": "no frame"}
+
+            base_key = (card, frames[0]["hash"])
+            need_full = force or (base_key != self._last_base_key)
+            if need_full:
+                frame = frames[0]
+                self._anim_idx = 0
+                self._jpg_cache[card] = (frame["hash"], frame["full"])
+            else:
+                if not self._animations_enabled() or len(frames) <= 1:
+                    return {"ok": True, "card": card, "reason": reason, "skipped": True, "ms": 0}
+                interval = self._anim_interval(card)
+                if (now_mono - self._last_anim_ts) < interval:
+                    return {"ok": True, "card": card, "reason": reason, "skipped": True, "ms": 0}
+                self._anim_idx = (self._anim_idx + 1) % len(frames)
+                frame = frames[self._anim_idx]
+                self._jpg_cache[card] = (frame["hash"], frame["full"])
+
+            use_partial = (not need_full) and bool(self._last_device_status.get("partial_frame", True))
+
         try:
-            res = self.driver.push_frame(card, jpg_bytes, content_hash, force=force)
-            if not res.get("skipped"):
-                print(f"[push] {card} ({reason}) -> {len(jpg_bytes)}B in {res.get('pc_ms', '?')}ms (esp={res.get('ms', '?')}ms)", flush=True)
+            if need_full:
+                res = self.driver.push_frame(card, frame["full"], frame["hash"], force=force)
+                if not res.get("skipped"):
+                    print(
+                        f"[push] {card} ({reason}) -> {len(frame['full'])}B in {res.get('pc_ms', '?')}ms "
+                        f"(esp={res.get('ms', '?')}ms)",
+                        flush=True,
+                    )
+                with self._lock:
+                    self._last_base_key = base_key
+                    self._last_anim_ts = time.monotonic()
+            elif use_partial and isinstance(self.driver, RawFrameDriver):
+                res = self.driver.push_region(card, frame["strip"], frame["strip_hash"], x=0, y=0)
+                with self._lock:
+                    self._last_anim_ts = time.monotonic()
+            else:
+                res = self.driver.push_frame(card, frame["full"], frame["hash"], force=False)
+                with self._lock:
+                    self._last_anim_ts = time.monotonic()
             return {"ok": True, "card": card, "reason": reason, **res}
         except Exception as exc:
             print(f"[push] Error sending {card}: {exc}", flush=True)
+            with self._lock:
+                self._last_base_key = ("", "")
             return {"ok": False, "card": card, "error": str(exc)}
 
     def _run_loop(self) -> None:
         last_health_ts = 0.0
         while not self._stop.is_set():
-            self._wake.wait(timeout=1.0)
+            wait_s = 1.0
+            if self._animations_enabled():
+                with self._lock:
+                    interval = self._anim_interval(self.active_card)
+                    elapsed = time.monotonic() - self._last_anim_ts
+                wait_s = max(0.05, min(1.0, interval - elapsed))
+            self._wake.wait(timeout=wait_s)
             self._wake.clear()
             if self._stop.is_set():
                 break
@@ -641,9 +765,9 @@ class PokeHubEngine:
                 with self._lock:
                     self._render_card_locked("clock")
                     if self.config.get("auto_night_palette"):
-                        self._jpg_cache.pop("weather", None)
-                        self._jpg_cache.pop("gemini", None)
-                        self._jpg_cache.pop("spotify", None)
+                        for c in ("weather", "gemini", "spotify"):
+                            self._jpg_cache.pop(c, None)
+                            self._anim_cache.pop(c, None)
                 if self.config.get("night_mode"):
                     self._apply_effective_brightness()
 
@@ -667,11 +791,13 @@ class PokeHubEngine:
                         self.driver = new_drv
                         print(f"[hub] Switched driver to {new_drv.name}", flush=True)
                 elif isinstance(self.driver, RawFrameDriver) and st.get("frames", 1) == 0:
-                    # Device just rebooted -> force re-push active frame!
+                    # Device just rebooted -> force re-push active frame & sync offline config!
                     self.driver.invalidate_cache()
+                    self._last_base_key = ("", "")
                     self.driver.set_brightness(self.config["brightness"])
                     if self.config.get("rotation", 0):
                         self.driver.set_rotation(self.config["rotation"])
+                    self._sync_offline_config()
 
-            # 5. Push active frame if changed
+            # 5. Push active frame or next PC-side animation strip
             self._push_now(force=False)

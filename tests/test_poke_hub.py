@@ -19,8 +19,8 @@ if str(ROOT) not in sys.path:
 from drivers.base import DisplayDriver
 from hub.mdns_publisher import MdnsPublisher
 from hub.server import make_handler
-from hub.state_engine import PokeHubEngine, render_svg_to_jpg_bytes
-from screens import build_notify_svg
+from hub.state_engine import PokeHubEngine, render_svg_to_full_and_strip, render_svg_to_jpg_bytes
+from screens import build_clock_svg, build_notify_svg, build_spotify_svg, build_weather_svg
 
 
 class MockDriver(DisplayDriver):
@@ -158,6 +158,26 @@ class TestPokeHub(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_pc_animations_render_distinct_frames_and_strip(self) -> None:
+        from datetime import datetime
+
+        track = {"title": "Opening Theme", "artist": "Poke Band", "album": "Johto"}
+        sp_svgs = [build_spotify_svg(track, self.engine.config, anim_frame=i) for i in range(6)]
+        self.assertEqual(len(set(sp_svgs)), 6)
+
+        now = datetime(2026, 11, 22, 14, 30)
+        clk_svgs = [build_clock_svg(now, self.engine.config, self.engine.weather_data, anim_frame=i) for i in range(4)]
+        self.assertEqual(len(set(clk_svgs)), 4)
+
+        w_svgs = [build_weather_svg(self.engine.weather_data, self.engine.config, anim_frame=i) for i in range(4)]
+        self.assertEqual(len(set(w_svgs)), 4)
+
+        full_jpg, strip_jpg = render_svg_to_full_and_strip(sp_svgs[1])
+        self.assertTrue(full_jpg.startswith(b"\xff\xd8\xff"))
+        self.assertTrue(strip_jpg.startswith(b"\xff\xd8\xff"))
+        self.assertLess(len(strip_jpg), len(full_jpg))
+        self.assertLess(len(full_jpg), 23500)
 
 
 if __name__ == "__main__":

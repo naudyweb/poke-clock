@@ -2,443 +2,2038 @@
 <html lang="es">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Poké-Hub · Control de Pantalla</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#EDF0F5">
+<title>Poké-Hub · Pokégear Control</title>
 <style>
   :root {
-    --cream: #f8f8f0;
-    --ink: #181820;
-    --muted: #5a6470;
-    --green: #24a848;
-    --blue: #2868c8;
-    --gold: #f8b800;
-    --red: #e03838;
-    --card: #ffffff;
+    /* Silph Co. / Pokégear Pearl-Silver Hardware Palette */
+    --canvas: #EDF0F5;
+    --canvas-recessed: #E1E6EE;
+    --surface: #FFFFFF;
+    --surface-hover: #F5F7FB;
+    --ink: #161A24;
+    --ink-secondary: #4E5668;
+    --ink-muted: #5F687B;
+    --hairline: rgba(22, 26, 36, 0.10);
+    --hairline-strong: rgba(22, 26, 36, 0.18);
+
+    /* Pokémon Hardware Accents (Pokédex Crimson, Pokégear Cobalt, Emerald, Pikachu Amber) */
+    --crimson: #D1343E;
+    --crimson-hover: #B82932;
+    --crimson-soft: rgba(209, 52, 62, 0.10);
+    --cobalt: #225AD6;
+    --cobalt-soft: rgba(34, 90, 214, 0.11);
+    --emerald: #14833F;
+    --emerald-soft: rgba(20, 131, 63, 0.11);
+    --amber: #C98600;
+    --amber-soft: rgba(230, 161, 0, 0.15);
+
+    /* Handheld Bezel */
+    --bezel-bg: #242936;
+    --bezel-edge: #181C26;
+    --bezel-text: #C8CFDD;
+
+    /* Physical Depth Shadows (Soft offset, zero hard neobrutalist blocks) */
+    --shadow-sm: 0 1px 2px rgba(22, 26, 36, 0.05), 0 1px 1px rgba(22, 26, 36, 0.03);
+    --shadow-md: 0 1px 2px rgba(22, 26, 36, 0.05), 0 10px 26px -10px rgba(22, 26, 36, 0.11);
+    --shadow-bezel: 0 2px 5px rgba(22, 26, 36, 0.14), 0 18px 36px -16px rgba(22, 26, 36, 0.28);
+    --shadow-toast: 0 8px 28px -6px rgba(22, 26, 36, 0.22), 0 2px 6px rgba(22, 26, 36, 0.08);
+
+    /* Emil Kowalski Custom Easing Curves */
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 18px;
+    --font-sans: "Barlow", "Adwaita Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
+
   * { box-sizing: border-box; }
+
+  ::selection {
+    background: #FDE68A;
+    color: var(--ink);
+  }
+
+  html {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    scrollbar-color: rgba(24, 27, 34, 0.22) transparent;
+    scrollbar-width: thin;
+  }
+
   body {
     margin: 0;
-    padding: 18px;
-    background: var(--cream);
+    min-height: 100dvh;
+    background: var(--canvas);
     color: var(--ink);
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    display: flex;
-    justify-content: center;
+    caret-color: var(--crimson);
+    padding: 20px 18px 40px;
   }
-  .wrap { width: 100%; max-width: 840px; }
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    border: 4px solid var(--ink);
-    background: var(--card);
-    padding: 12px 16px;
-    box-shadow: 4px 4px 0 #c8d0c0;
-    margin-bottom: 16px;
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(24, 27, 34, 0.18);
+    border-radius: 999px;
+    border: 2px solid var(--canvas);
   }
-  .header h1 { margin: 0; font-size: 17px; letter-spacing: 1px; }
-  .header-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .domain-chip {
-    font-size: 11px;
-    font-weight: 700;
-    padding: 4px 8px;
-    border: 2px solid var(--ink);
-    background: var(--cream);
-    color: var(--blue);
-    text-decoration: none;
-  }
-  .badge {
-    font-size: 11px;
-    font-weight: 700;
-    padding: 4px 8px;
-    border: 2px solid var(--ink);
-    background: var(--green);
-    color: #fff;
-  }
-  .badge.off { background: var(--red); }
-  .grid {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    gap: 16px;
-    align-items: start;
-  }
-  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
-  .panel {
-    border: 3px solid var(--ink);
-    background: var(--card);
-    padding: 14px;
-    box-shadow: 4px 4px 0 #c8d0c0;
-    margin-bottom: 16px;
-  }
-  .panel h2 {
-    margin: 0 0 10px 0;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--blue);
-    border-bottom: 2px solid #e4e8dc;
-    padding-bottom: 6px;
-  }
-  .screen-frame {
-    width: 246px;
-    height: 246px;
-    margin: 0 auto 10px auto;
-    border: 3px solid var(--ink);
-    background: var(--cream);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .screen-frame img {
-    width: 240px;
-    height: 240px;
-    image-rendering: pixelated;
-    display: block;
-  }
-  .meta { font-size: 11.5px; color: var(--muted); text-align: center; line-height: 1.5; }
-  .btn-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-  button {
-    font-family: inherit;
-    font-weight: 700;
-    font-size: 12.5px;
-    padding: 9px 10px;
-    border: 2px solid var(--ink);
-    background: var(--cream);
-    color: var(--ink);
-    cursor: pointer;
-    box-shadow: 2px 2px 0 var(--ink);
-    transition: transform 0.05s;
-  }
-  button:active { transform: translate(2px, 2px); box-shadow: none; }
-  button.active { background: var(--gold); }
-  button.primary { background: var(--blue); color: #fff; }
-  button.auto { background: var(--green); color: #fff; grid-column: span 2; }
-  .toggle-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 6px 0;
-    border-bottom: 1px dashed #d8dfd0;
-    font-size: 12.5px;
-    gap: 10px;
-  }
-  .toggle-row:last-child { border-bottom: none; }
-  input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--green); cursor: pointer; }
-  input[type="range"] { width: 100%; accent-color: var(--blue); }
-  input[type="text"], input[type="number"], select {
+
+  .app {
     width: 100%;
-    font-family: inherit;
-    font-size: 12.5px;
-    padding: 6px 8px;
-    border: 2px solid var(--ink);
-    background: var(--cream);
-    margin-bottom: 8px;
+    max-width: 980px;
+    margin: 0 auto;
   }
-  .toggle-row select, .toggle-row input[type="text"], .toggle-row input[type="number"] {
-    width: 155px;
-    margin-bottom: 0;
-  }
-  .palettes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px; }
-  .pal-btn {
+
+  /* ============================================================
+     Top Hardware Bar (Pokédex Status Header)
+     ============================================================ */
+  .topbar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 11.5px;
-    padding: 8px;
-    text-align: left;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 13px 18px;
+    margin-bottom: 20px;
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.95);
   }
-  .swatch {
-    width: 16px;
-    height: 16px;
-    border: 2px solid var(--ink);
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  /* Pokédex Camera Lens + 3 Hardware LEDs */
+  .pokedex-lens {
+    position: relative;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 32% 30%, #7CC4FF 0%, #2266E3 56%, #133B8F 100%);
+    border: 3px solid #FFFFFF;
+    box-shadow: 0 0 0 1px rgba(24, 27, 34, 0.16), inset 0 2px 4px rgba(255, 255, 255, 0.55);
     flex-shrink: 0;
   }
-  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  .pokedex-lens::after {
+    content: "";
+    position: absolute;
+    top: 5px;
+    left: 6px;
+    width: 8px;
+    height: 5px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.72);
+    transform: rotate(-28deg);
+  }
+
+  .brand-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .brand-title h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+    text-wrap: balance;
+  }
+
+  .hw-leds {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: 2px;
+  }
+
+  .led {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.55), 0 0 0 1px rgba(24, 27, 34, 0.12);
+  }
+  .led.r { background: #E3424B; }
+  .led.y { background: #F0B429; }
+  .led.g { background: #22B05B; }
+
+  .brand-sub {
+    font-size: 12px;
+    color: var(--ink-secondary);
+    margin-top: 1px;
+  }
+
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .pill-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    text-decoration: none;
+    transition: background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), transform 140ms var(--ease-out);
+  }
+
+  .pill-link:active { transform: scale(0.97); }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 11px;
+    border-radius: 999px;
+    background: var(--emerald-soft);
+    color: #0F6A33;
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    border: 1px solid rgba(21, 138, 67, 0.2);
+  }
+
+  .status-pill.offline {
+    background: var(--crimson-soft);
+    color: #A6202A;
+    border-color: rgba(209, 52, 62, 0.22);
+  }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid var(--hairline);
+    background: var(--surface);
+    color: var(--ink-secondary);
+    cursor: pointer;
+    transition: background-color 150ms var(--ease-out), color 150ms var(--ease-out), transform 140ms var(--ease-out);
+  }
+
+  .icon-btn:active { transform: scale(0.94); }
+  .icon-btn.spinning svg { animation: spin 650ms linear infinite; }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* ============================================================
+     Main Asymmetric Hardware Deck Layout
+     ============================================================ */
+  .deck {
+    display: grid;
+    grid-template-columns: 332px 1fr;
+    gap: 22px;
+    align-items: start;
+  }
+
+  @media (max-width: 820px) {
+    .deck { grid-template-columns: 1fr; gap: 18px; }
+    .stage-col { position: static !important; }
+  }
+
+  /* Left Column: Sticky Pokégear Handheld Viewport */
+  .stage-col {
+    position: sticky;
+    top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+  }
+
+  .handheld {
+    min-width: 0;
+    background: linear-gradient(180deg, #2D323E 0%, #222630 100%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 22px 22px 34px 22px;
+    padding: 16px 18px 18px;
+    box-shadow: var(--shadow-bezel), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    color: var(--bezel-text);
+  }
+
+  .handheld-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: #9CA4B5;
+  }
+
+  .power-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .power-led {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #28C864;
+    border: 1px solid rgba(0, 0, 0, 0.35);
+    box-shadow: inset 0 1px 1.5px rgba(255, 255, 255, 0.65), 0 1px 2px rgba(0, 0, 0, 0.40);
+    transition: background-color 200ms var(--ease-out);
+  }
+
+  .power-led.off {
+    background: #E04850;
+  }
+
+  .screen-well {
+    position: relative;
+    width: 248px;
+    height: 248px;
+    margin: 0 auto;
+    padding: 4px;
+    border-radius: 10px;
+    background: #12151C;
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.65), 0 1px 0 rgba(255, 255, 255, 0.09);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .screen-well img {
+    width: 240px;
+    height: 240px;
+    border-radius: 6px;
+    image-rendering: pixelated;
+    display: block;
+    background: #F8F8F0;
+    transition: filter 160ms ease, opacity 160ms ease;
+  }
+
+  /* Emil Kowalski blur-mask transition when switching screens */
+  .screen-well img.swapping {
+    filter: blur(1.8px);
+    opacity: 0.72;
+  }
+
+  .handheld-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 12px;
+    padding: 0 2px;
+    gap: 10px;
+  }
+
+  .handheld-model {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #A6AEBF;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .speaker-grille {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .speaker-grille span {
+    width: 3px;
+    height: 12px;
+    border-radius: 99px;
+    background: rgba(0, 0, 0, 0.45);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    transform: rotate(-18deg);
+  }
+
+  .telemetry-bar {
+    margin-top: 12px;
+    padding-top: 11px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tel-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .tel-val {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: #F4F6FA;
+  }
+
+  .tel-lbl {
+    font-size: 11.5px;
+    color: #9CA5B8;
+  }
+
+  .now-playing-strip {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #DDE2EC;
+  }
+
+  .now-playing-strip .eq-mini {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+    flex-shrink: 0;
+  }
+
+  .now-playing-strip .eq-mini i {
+    display: block;
+    width: 2.5px;
+    border-radius: 1px;
+    background: #28C864;
+    height: 4px;
+  }
+
+  .now-playing-strip.playing .eq-mini i:nth-child(1) { animation: eqMini 640ms var(--ease-in-out) infinite alternate; }
+  .now-playing-strip.playing .eq-mini i:nth-child(2) { animation: eqMini 480ms var(--ease-in-out) 120ms infinite alternate; }
+  .now-playing-strip.playing .eq-mini i:nth-child(3) { animation: eqMini 560ms var(--ease-in-out) 220ms infinite alternate; }
+
+  @keyframes eqMini {
+    from { height: 3px; }
+    to { height: 12px; }
+  }
+
+  .now-playing-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  /* Compact Hardware Controls Under Screen */
+  .hw-panel {
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .slider-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .mono-readout {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--canvas-recessed);
+    outline: none;
+    cursor: pointer;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 2px solid var(--cobalt);
+    box-shadow: 0 2px 5px rgba(24, 27, 34, 0.18);
+    transition: transform 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+  }
+
+  input[type="range"]:active::-webkit-slider-thumb {
+    transform: scale(1.12);
+    box-shadow: 0 0 0 4px var(--cobalt-soft);
+  }
+
+  .hw-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-top: 12px;
+    border-top: 1px solid var(--hairline);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .seg-mini {
+    display: inline-flex;
+    background: var(--canvas-recessed);
+    padding: 3px;
+    border-radius: 10px;
+    gap: 2px;
+  }
+
+  .seg-mini button {
+    border: 0;
+    background: transparent;
+    color: var(--ink-secondary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 5px 10px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background-color 150ms var(--ease-out), color 150ms var(--ease-out), transform 130ms var(--ease-out);
+  }
+
+  .seg-mini button:active { transform: scale(0.96); }
+
+  .seg-mini button.active {
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: 0 1px 3px rgba(24, 27, 34, 0.12);
+  }
+
+  /* ============================================================
+     Right Column: Action Deck + Tabbed Workspace
+     ============================================================ */
+  .work-col {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    min-width: 0;
+  }
+
+  .surface-block {
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 18px;
+    box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  }
+
+  .block-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  .block-head h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    color: var(--ink);
+  }
+
+  .block-hint {
+    font-size: 12px;
+    color: var(--ink-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Screen Switcher Grid (Primary Hardware Actions) */
+  .screen-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 9px;
+  }
+
+  @media (max-width: 560px) {
+    .screen-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  .screen-btn {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--hairline);
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out), transform 140ms var(--ease-out);
+  }
+
+  .screen-btn:active { transform: scale(0.97); }
+  .screen-btn[data-instant] { transition-duration: 0ms; }
+
+  .screen-btn .s-top {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .screen-btn .s-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    color: var(--ink-secondary);
+    border: 1px solid var(--hairline);
+    transition: background-color 160ms var(--ease-out), color 160ms var(--ease-out), border-color 160ms var(--ease-out);
+  }
+
+  .screen-btn .kbd {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-muted);
+    padding: 1px 6px;
+    border-radius: 5px;
+    border: 1px solid var(--hairline);
+    background: rgba(255, 255, 255, 0.75);
+  }
+
+  .screen-btn .s-name {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .screen-btn.active {
+    background: var(--surface);
+    border-color: var(--cobalt);
+    box-shadow: 0 0 0 2px var(--cobalt-soft), var(--shadow-sm);
+  }
+
+  .screen-btn.active .s-icon {
+    background: var(--cobalt);
+    color: #FFFFFF;
+    border-color: transparent;
+  }
+
+  .screen-btn.active[data-card="spotify"] {
+    border-color: var(--emerald);
+    box-shadow: 0 0 0 2px var(--emerald-soft), var(--shadow-sm);
+  }
+
+  .screen-btn.active[data-card="spotify"] .s-icon {
+    background: var(--emerald);
+  }
+
+  .auto-bar {
+    margin-top: 10px;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--hairline);
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), transform 140ms var(--ease-out);
+  }
+
+  .auto-bar:active { transform: scale(0.985); }
+
+  .auto-bar.active {
+    background: var(--emerald-soft);
+    border-color: rgba(21, 138, 67, 0.35);
+    color: #0E6631;
+  }
+
+  .auto-bar-left {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* ============================================================
+     Segmented Workspace Tabs (Emil Kowalski Sliding Indicator)
+     ============================================================ */
+  .tabs-nav {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    padding: 4px;
+    border-radius: 13px;
+    background: var(--canvas-recessed);
+    border: 1px solid var(--hairline);
+    margin-bottom: 18px;
+  }
+
+  .tab-indicator {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: calc((100% - 8px) / 3);
+    height: calc(100% - 8px);
+    border-radius: 9px;
+    background: var(--surface);
+    box-shadow: 0 1px 3px rgba(24, 27, 34, 0.10), 0 1px 1px rgba(24, 27, 34, 0.04);
+    transform: translateX(0%);
+    transition: transform 220ms var(--ease-out);
+    pointer-events: none;
+  }
+
+  .tab-btn {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 8px 10px;
+    border: 0;
+    background: transparent;
+    color: var(--ink-secondary);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: color 160ms var(--ease-out);
+  }
+
+  .tab-btn[aria-selected="true"] {
+    color: var(--ink);
+  }
+
+  .tab-panel {
+    display: none;
+  }
+
+  .tab-panel.active {
+    display: block;
+    animation: panelEnter 180ms var(--ease-out);
+  }
+
+  @keyframes panelEnter {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ============================================================
+     Tab 1: Apariencia (Palettes & Pokémon Companions)
+     ============================================================ */
+  .sub-title {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ink);
+  }
+
+  .sub-title.spaced {
+    margin-top: 22px;
+  }
+
+  .palette-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  @media (max-width: 520px) {
+    .palette-grid { grid-template-columns: 1fr; }
+  }
+
+  .pal-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 11px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--hairline);
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 150ms var(--ease-out), background-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out), transform 140ms var(--ease-out);
+  }
+
+  .pal-card:active { transform: scale(0.97); }
+
+  .pal-card.active {
+    background: var(--surface);
+    border-color: var(--cobalt);
+    box-shadow: 0 0 0 2px var(--cobalt-soft);
+  }
+
+  .pal-preview {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px;
+    border-radius: 8px;
+    background: rgba(24, 27, 34, 0.06);
+  }
+
+  .pal-preview span {
+    width: 12px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1px solid rgba(24, 27, 34, 0.14);
+  }
+
+  .pal-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .pal-desc {
+    font-size: 11.5px;
+    font-weight: 400;
+    color: var(--ink-secondary);
+  }
+
+  /* List Rows (Settings & Pokémon Selectors) */
+  .list-group {
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    background: var(--canvas);
+    overflow: hidden;
+  }
+
+  .list-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 11px 14px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .list-row:last-child { border-bottom: 0; }
+
+  .row-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .row-label strong {
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .row-label small {
+    font-size: 11.5px;
+    color: var(--ink-secondary);
+  }
+
+  /* Custom Switch Control (Tactile Hardware Toggle) */
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 23px;
+    flex-shrink: 0;
+  }
+
+  .switch input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .switch-track {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: rgba(24, 27, 34, 0.20);
+    cursor: pointer;
+    transition: background-color 180ms var(--ease-out);
+  }
+
+  .switch-track::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    background: #FFFFFF;
+    box-shadow: 0 1px 3px rgba(24, 27, 34, 0.28);
+    transition: transform 180ms var(--ease-out);
+  }
+
+  .switch input:checked + .switch-track {
+    background: var(--emerald);
+  }
+
+  .switch input:checked + .switch-track::after {
+    transform: translateX(17px);
+  }
+
+  .switch input:focus-visible + .switch-track {
+    outline: 2px solid var(--cobalt);
+    outline-offset: 2px;
+  }
+
+  /* Form Controls */
+  select, input[type="text"], input[type="number"] {
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--radius-sm);
+    padding: 7px 10px;
+    transition: border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
+  }
+
+  select:focus-visible, input[type="text"]:focus-visible, input[type="number"]:focus-visible, button:focus-visible, a:focus-visible {
+    outline: 2px solid var(--cobalt);
+    outline-offset: 2px;
+  }
+
+  .list-row select, .list-row input[type="text"] {
+    width: 168px;
+  }
+
+  .poke-select-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .poke-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid rgba(24, 27, 34, 0.22);
+    flex-shrink: 0;
+  }
+
+  /* ============================================================
+     Tab 2: Avisos Pokémon (Quick Alert Composer)
+     ============================================================ */
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+
+  .field label {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .field input[type="text"] {
+    width: 100%;
+    padding: 10px 12px;
+  }
+
+  .chip-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .poke-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 11px;
+    border-radius: 999px;
+    border: 1px solid var(--hairline);
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 150ms var(--ease-out), background-color 150ms var(--ease-out), transform 130ms var(--ease-out);
+  }
+
+  .poke-chip:active { transform: scale(0.96); }
+
+  .poke-chip.active {
+    background: var(--surface);
+    border-color: var(--crimson);
+    box-shadow: 0 0 0 2px var(--crimson-soft);
+  }
+
+  .primary-btn {
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 11px 16px;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: var(--crimson);
+    color: #FFFFFF;
+    font-family: inherit;
+    font-size: 13.5px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(209, 52, 62, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    transition: background-color 150ms var(--ease-out), transform 140ms var(--ease-out), opacity 150ms var(--ease-out);
+  }
+
+  .primary-btn:active { transform: scale(0.98); }
+  .primary-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .secondary-btn {
+    width: 100%;
+    margin-top: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--radius-md);
+    background: var(--ink);
+    color: #FFFFFF;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 150ms var(--ease-out), transform 140ms var(--ease-out);
+  }
+
+  .secondary-btn:active { transform: scale(0.98); }
+
+  .night-inputs {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .night-inputs input[type="number"] {
+    width: 58px;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    padding: 6px;
+  }
+
+  .offline-note {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    font-size: 12px;
+    color: var(--ink-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  /* ============================================================
+     Sonner-style Interruptible Toast
+     ============================================================ */
+  .toast-host {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 40;
+    pointer-events: none;
+  }
+
+  @media (max-width: 560px) {
+    .toast-host { left: 16px; right: 16px; bottom: 16px; }
+  }
+
   .toast {
-    position: fixed; bottom: 16px; right: 16px;
-    background: var(--ink); color: #fff; padding: 8px 14px;
-    font-size: 12px; display: none; border: 2px solid var(--gold); z-index: 10;
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 11px 14px;
+    border-radius: 12px;
+    background: var(--ink);
+    color: #F8FAFC;
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: var(--shadow-toast);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    opacity: 0;
+    transform: translateY(100%) scale(0.95);
+    transition: transform 220ms var(--ease-out), opacity 180ms var(--ease-out);
+    visibility: hidden;
+  }
+
+  .toast.open {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    visibility: visible;
+  }
+
+  .toast-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #28C864;
+    flex-shrink: 0;
+  }
+
+  .toast.error .toast-dot { background: #F05252; }
+
+  /* ============================================================
+     Pointer-fine Hover States (Zero sticky hover on touch!)
+     ============================================================ */
+  @media (hover: hover) and (pointer: fine) {
+    .pill-link:hover { background: var(--canvas-recessed); border-color: var(--hairline-strong); }
+    .icon-btn:hover { background: var(--canvas); color: var(--ink); }
+    .screen-btn:hover:not(.active) { background: var(--surface-hover); border-color: var(--hairline-strong); }
+    .auto-bar:hover:not(.active) { background: var(--surface-hover); border-color: var(--hairline-strong); }
+    .pal-card:hover:not(.active) { background: var(--surface-hover); border-color: var(--hairline-strong); }
+    .poke-chip:hover:not(.active) { background: var(--surface-hover); border-color: var(--hairline-strong); }
+    .primary-btn:hover:not(:disabled) { background: var(--crimson-hover); }
+    .secondary-btn:hover { opacity: 0.92; }
+  }
+
+  /* ============================================================
+     Reduced Motion Accessibility (Preserves state clarity)
+     ============================================================ */
+  @media (prefers-reduced-motion: reduce) {
+    .tab-indicator,
+    .screen-btn,
+    .auto-bar,
+    .pal-card,
+    .poke-chip,
+    .primary-btn,
+    .secondary-btn,
+    .pill-link,
+    .icon-btn,
+    .switch-track::after,
+    .toast {
+      transition-duration: 0.01ms !important;
+      transform: none !important;
+    }
+    .tab-panel.active,
+    .now-playing-strip.playing .eq-mini i,
+    .icon-btn.spinning svg {
+      animation: none !important;
+    }
+    .screen-well img.swapping {
+      filter: none;
+    }
   }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="header">
-    <h1>POKE-HUB · CONTROL 100% EN PC</h1>
-    <div class="header-right">
-      <a id="domainChip" class="domain-chip" href="http://pokeclock.local">pokeclock.local</a>
-      <span id="statusBadge" class="badge">CONECTANDO</span>
-    </div>
-  </div>
-
-  <div class="grid">
-    <!-- Left column -->
-    <div>
-      <div class="panel">
-        <h2>En Pantalla Ahora</h2>
-        <div class="screen-frame">
-          <img id="liveImg" src="/api/preview/active" alt="Live screen">
+<div class="app">
+  <!-- Pokédex Hardware Header -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="pokedex-lens" aria-hidden="true"></div>
+      <div>
+        <div class="brand-title">
+          <h1>Poké-Hub</h1>
+          <span class="hw-leds" aria-hidden="true">
+            <span class="led r"></span>
+            <span class="led y"></span>
+            <span class="led g"></span>
+          </span>
         </div>
-        <div class="meta" id="liveMeta">Cargando...</div>
-      </div>
-
-      <div class="panel">
-        <h2>Brillo y Rotación</h2>
-        <div style="font-size:12px;margin-bottom:4px;">Brillo: <b id="brightVal">95</b>%</div>
-        <input type="range" id="brightRange" min="0" max="100" value="95">
-        <div class="two" style="margin-top:8px;">
-          <button onclick="setRot(0)">Rot 0°</button>
-          <button onclick="setRot(2)">Rot 180°</button>
-        </div>
-      </div>
-
-      <div class="panel">
-        <h2>Enviar Aviso Pokémon</h2>
-        <input type="text" id="nTitle" placeholder="Título (ej. BUILD OK)">
-        <input type="text" id="nMsg" placeholder="Mensaje en pantalla...">
-        <div class="two">
-          <select id="nPoke">
-            <option value="pikachu">Pikachu</option>
-            <option value="charmander">Charmander</option>
-            <option value="squirtle">Squirtle</option>
-            <option value="bulbasaur">Bulbasaur</option>
-            <option value="gengar">Gengar</option>
-            <option value="snorlax">Snorlax</option>
-            <option value="jigglypuff">Jigglypuff</option>
-          </select>
-          <input type="number" id="nTtl" value="12" min="2" max="120" title="Duración (s)">
-        </div>
-        <button class="primary" style="width:100%;" onclick="sendNotify()">Enviar Aviso Ahora</button>
+        <div class="brand-sub">Control Pokégear · JUZIPi SD PRO</div>
       </div>
     </div>
 
-    <!-- Right column -->
-    <div>
-      <div class="panel">
-        <h2>Cambio Instantáneo (~150 ms)</h2>
-        <div class="btn-row">
-          <button id="btn-clock" onclick="showCard('clock')">Poké Clock</button>
-          <button id="btn-weather" onclick="showCard('weather')">Poké Weather</button>
-          <button id="btn-gemini" onclick="showCard('gemini')">Gemini Tokens</button>
-          <button id="btn-spotify" onclick="showCard('spotify')">Spotify</button>
-          <button id="btn-auto" class="auto" onclick="setAuto()">Modo Automático</button>
-        </div>
-      </div>
+    <div class="topbar-right">
+      <a id="domainChip" class="pill-link" href="http://pokeclock.local" title="Dirección local en tu Wi-Fi">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></svg>
+        <span id="domainText">pokeclock.local</span>
+      </a>
+      <span id="statusBadge" class="status-pill" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="statusText">Conectando</span>
+      </span>
+      <button id="refreshBtn" class="icon-btn" type="button" onclick="forceRefreshData()" title="Actualizar clima y Gemini" aria-label="Actualizar datos">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+      </button>
+    </div>
+  </header>
 
-      <div class="panel">
-        <h2>Paleta de Colores Retro</h2>
-        <div class="palettes">
-          <button class="pal-btn" id="pal-gbc_classic" onclick="setPalette('gbc_classic')">
-            <span class="swatch" style="background:#f8f8f0;"></span>GBC Oro/Plata
-          </button>
-          <button class="pal-btn" id="pal-gbc_dark" onclick="setPalette('gbc_dark')">
-            <span class="swatch" style="background:#101422;"></span>Cristal Nocturno
-          </button>
-          <button class="pal-btn" id="pal-gb_green" onclick="setPalette('gb_green')">
-            <span class="swatch" style="background:#9bbc0f;"></span>Game Boy DMG
-          </button>
-          <button class="pal-btn" id="pal-pokedex_red" onclick="setPalette('pokedex_red')">
-            <span class="swatch" style="background:#e03838;"></span>Pokédex Rojo
-          </button>
+  <main class="deck">
+    <!-- Left Column: Handheld Pokégear Viewport & Hardware Controls -->
+    <aside class="stage-col">
+      <section class="handheld" aria-label="Vista en vivo de la pantalla">
+        <div class="handheld-top">
+          <span class="power-indicator">
+            <span id="powerLed" class="power-led"></span>
+            <span id="activeLabel">EN VIVO</span>
+          </span>
+          <span id="fwLabel" style="font-family:var(--font-mono);">RAM v1.2</span>
         </div>
-        <div class="toggle-row">
-          <span>Paleta oscura automática de noche</span>
-          <input type="checkbox" id="autoNightPal" onchange="saveCustom()">
-        </div>
-      </div>
 
-      <div class="panel">
-        <h2>Pokémon por Pantalla</h2>
-        <div class="toggle-row"><span>Reloj (Día)</span><select id="sp-clock_day" onchange="saveSprites()"></select></div>
-        <div class="toggle-row"><span>Reloj (Noche)</span><select id="sp-clock_night" onchange="saveSprites()"></select></div>
-        <div class="toggle-row"><span>Clima</span><select id="sp-weather" onchange="saveSprites()"></select></div>
-        <div class="toggle-row"><span>Gemini Tokens</span><select id="sp-gemini" onchange="saveSprites()"></select></div>
-        <div class="toggle-row"><span>Spotify</span><select id="sp-spotify" onchange="saveSprites()"></select></div>
-      </div>
-
-      <div class="panel">
-        <h2>Rotación, Región y Modo Nocturno</h2>
-        <div class="toggle-row"><span>Poké Clock en rotación</span><input type="checkbox" id="en-clock" onchange="saveCustom()"></div>
-        <div class="toggle-row"><span>Poké Weather en rotación</span><input type="checkbox" id="en-weather" onchange="saveCustom()"></div>
-        <div class="toggle-row"><span>Gemini Tokens en rotación</span><input type="checkbox" id="en-gemini" onchange="saveCustom()"></div>
-        <div class="toggle-row"><span><b>Prioridad exclusiva Spotify</b></span><input type="checkbox" id="en-spprio" onchange="saveCustom()"></div>
-        <div class="toggle-row">
-          <span>Intervalo rotación</span>
-          <select id="rotInt" onchange="saveCustom()">
-            <option value="5">5 seg</option>
-            <option value="10">10 seg</option>
-            <option value="12">12 seg</option>
-            <option value="20">20 seg</option>
-            <option value="30">30 seg</option>
-            <option value="60">60 seg</option>
-          </select>
+        <div class="screen-well">
+          <img id="liveImg" src="/api/preview/active" alt="Vista actual en la pantalla Pokémon" width="240" height="240">
         </div>
-        <div class="toggle-row"><span>Nombre en reloj</span><input type="text" id="trainerName" placeholder="POKEGEAR" maxlength="10"></div>
-        <div class="toggle-row"><span>Ciudad (Clima)</span><input type="text" id="cityName" placeholder="Paracas"></div>
-        <div class="toggle-row"><span>Temperatura en °C</span><input type="checkbox" id="useCelsius" onchange="saveCustom()"></div>
-        <div class="toggle-row"><span>Formato 12 horas (AM/PM)</span><input type="checkbox" id="useHour12" onchange="saveCustom()"></div>
-        <div class="toggle-row"><span>Modo nocturno (baja brillo)</span><input type="checkbox" id="nightMode" onchange="saveCustom()"></div>
-        <div class="toggle-row">
-          <span>Horario nocturno / Brillo</span>
-          <div style="display:flex;gap:4px;width:155px;">
-            <input type="number" id="nightStart" min="0" max="23" value="23" style="width:48px;" title="Hora inicio">
-            <input type="number" id="nightEnd" min="0" max="23" value="7" style="width:48px;" title="Hora fin">
-            <input type="number" id="nightBright" min="1" max="100" value="18" style="width:52px;" title="Brillo %">
+
+        <div class="handheld-bottom">
+          <div class="handheld-model">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><circle cx="12" cy="12" r="3" fill="#262A34"/></svg>
+            <span>POKEGEAR COLOR</span>
+          </div>
+          <div class="speaker-grille" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span>
           </div>
         </div>
-        <button class="primary" style="width:100%;margin-top:8px;" onclick="saveCustom()">Guardar Personalización</button>
-      </div>
+
+        <div class="telemetry-bar">
+          <div class="tel-item">
+            <span class="tel-val" id="telMode">--</span>
+            <span class="tel-lbl">Vista</span>
+          </div>
+          <div class="tel-item">
+            <span class="tel-val" id="telLatency">-- ms</span>
+            <span class="tel-lbl">Latencia</span>
+          </div>
+          <div class="tel-item">
+            <span class="tel-val" id="telTemp">--°</span>
+            <span class="tel-lbl" id="telCity">Clima</span>
+          </div>
+        </div>
+
+        <div id="spotifyStrip" class="now-playing-strip">
+          <span class="eq-mini" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span id="spotifyText" class="now-playing-text">Spotify en pausa</span>
+        </div>
+      </section>
+
+      <section class="hw-panel" aria-label="Controles físicos de la pantalla">
+        <div>
+          <div class="slider-head">
+            <label for="brightRange">Brillo de pantalla</label>
+            <span class="mono-readout"><span id="brightVal">95</span>%</span>
+          </div>
+          <input type="range" id="brightRange" min="0" max="100" value="95">
+        </div>
+
+        <div class="hw-row">
+          <span>Orientación</span>
+          <div class="seg-mini" role="group" aria-label="Rotación de pantalla">
+            <button type="button" id="rot-0" onclick="setRot(0)">0°</button>
+            <button type="button" id="rot-1" onclick="setRot(1)">90°</button>
+            <button type="button" id="rot-2" onclick="setRot(2)">180°</button>
+            <button type="button" id="rot-3" onclick="setRot(3)">270°</button>
+          </div>
+        </div>
+
+        <div class="hw-row">
+          <div class="row-label">
+            <strong>Animaciones (solo PC)</strong>
+            <small>Ondas de música y Pokémon</small>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="en-anim" onchange="saveCustom()">
+            <span class="switch-track"></span>
+          </label>
+        </div>
+      </section>
+    </aside>
+
+    <!-- Right Column: Screen Switcher + Tabbed Workspace -->
+    <div class="work-col">
+      <!-- Primary Action Deck: Instant Screen Switcher -->
+      <section class="surface-block" aria-label="Selector de pantalla">
+        <div class="block-head">
+          <h2>Pantalla activa</h2>
+          <span class="block-hint">Atajos: 1–4 y A</span>
+        </div>
+
+        <div class="screen-grid">
+          <button type="button" class="screen-btn" id="btn-clock" data-card="clock" onclick="showCard('clock')">
+            <span class="s-top">
+              <span class="s-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>
+              </span>
+              <span class="kbd">1</span>
+            </span>
+            <span class="s-name">Reloj</span>
+          </button>
+
+          <button type="button" class="screen-btn" id="btn-weather" data-card="weather" onclick="showCard('weather')">
+            <span class="s-top">
+              <span class="s-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H7a4.5 4.5 0 0 1-.5-8.97A6 6 0 0 1 18 11a4 4 0 0 1-.5 8Z"/></svg>
+              </span>
+              <span class="kbd">2</span>
+            </span>
+            <span class="s-name">Clima</span>
+          </button>
+
+          <button type="button" class="screen-btn" id="btn-gemini" data-card="gemini" onclick="showCard('gemini')">
+            <span class="s-top">
+              <span class="s-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.6 6.4L21 12l-6.4 2.6L12 21l-2.6-6.4L3 12l6.4-2.6L12 3z"/></svg>
+              </span>
+              <span class="kbd">3</span>
+            </span>
+            <span class="s-name">Gemini</span>
+          </button>
+
+          <button type="button" class="screen-btn" id="btn-spotify" data-card="spotify" onclick="showCard('spotify')">
+            <span class="s-top">
+              <span class="s-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+              </span>
+              <span class="kbd">4</span>
+            </span>
+            <span class="s-name">Spotify</span>
+          </button>
+        </div>
+
+        <button type="button" id="btn-auto" class="auto-bar" onclick="setAuto()">
+          <span class="auto-bar-left">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            <span id="autoText">Rotación automática</span>
+          </span>
+          <span class="kbd" style="font-family:var(--font-mono);font-size:11px;opacity:0.75;">A</span>
+        </button>
+      </section>
+
+      <!-- Tabbed Customization Workspace -->
+      <section class="surface-block" aria-label="Personalización y configuración">
+        <div class="tabs-nav" role="tablist" aria-label="Secciones de control">
+          <div class="tab-indicator" id="tabIndicator" aria-hidden="true"></div>
+          <button type="button" class="tab-btn" role="tab" aria-selected="true" aria-controls="panel-look" id="tab-0" onclick="switchTab(0)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.5-.75 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c3.31 0 6-2.69 6-6 0-4.96-4.49-9-10-9z"/></svg>
+            Apariencia
+          </button>
+          <button type="button" class="tab-btn" role="tab" aria-selected="false" aria-controls="panel-alerts" id="tab-1" onclick="switchTab(1)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            Avisos
+          </button>
+          <button type="button" class="tab-btn" role="tab" aria-selected="false" aria-controls="panel-settings" id="tab-2" onclick="switchTab(2)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+            Ajustes
+          </button>
+        </div>
+
+        <!-- TAB 0: APARIENCIA -->
+        <div id="panel-look" class="tab-panel active" role="tabpanel" aria-labelledby="tab-0">
+          <h3 class="sub-title">Paleta de cartucho</h3>
+          <div class="palette-grid">
+            <button type="button" class="pal-card" id="pal-gbc_classic" onclick="setPalette('gbc_classic')">
+              <span class="pal-meta">
+                <span>GBC Oro y Plata</span>
+                <span class="pal-desc">Crema clásico</span>
+              </span>
+              <span class="pal-preview" aria-hidden="true">
+                <span style="background:#F8F8F0"></span>
+                <span style="background:#2868C8"></span>
+                <span style="background:#F8B800"></span>
+              </span>
+            </button>
+
+            <button type="button" class="pal-card" id="pal-gbc_dark" onclick="setPalette('gbc_dark')">
+              <span class="pal-meta">
+                <span>Cristal Nocturno</span>
+                <span class="pal-desc">Azul medianoche</span>
+              </span>
+              <span class="pal-preview" aria-hidden="true">
+                <span style="background:#101422"></span>
+                <span style="background:#60A5FA"></span>
+                <span style="background:#34D399"></span>
+              </span>
+            </button>
+
+            <button type="button" class="pal-card" id="pal-gb_green" onclick="setPalette('gb_green')">
+              <span class="pal-meta">
+                <span>Game Boy DMG</span>
+                <span class="pal-desc">Verde matriz</span>
+              </span>
+              <span class="pal-preview" aria-hidden="true">
+                <span style="background:#9BBC0F"></span>
+                <span style="background:#306230"></span>
+                <span style="background:#0F380F"></span>
+              </span>
+            </button>
+
+            <button type="button" class="pal-card" id="pal-pokedex_red" onclick="setPalette('pokedex_red')">
+              <span class="pal-meta">
+                <span>Pokédex Rojo</span>
+                <span class="pal-desc">Kanto carmesí</span>
+              </span>
+              <span class="pal-preview" aria-hidden="true">
+                <span style="background:#FFF4F0"></span>
+                <span style="background:#E03838"></span>
+                <span style="background:#1C1418"></span>
+              </span>
+            </button>
+          </div>
+
+          <div class="list-group">
+            <div class="list-row">
+              <div class="row-label">
+                <strong>Paleta nocturna automática</strong>
+                <small>Cambia a Cristal Nocturno en horario de noche</small>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="autoNightPal" onchange="saveCustom()">
+                <span class="switch-track"></span>
+              </label>
+            </div>
+          </div>
+
+          <h3 class="sub-title spaced">Compañero Pokémon por pantalla</h3>
+          <div class="list-group">
+            <div class="list-row">
+              <span>Reloj (Día)</span>
+              <span class="poke-select-wrap">
+                <span class="poke-dot" id="dot-clock_day"></span>
+                <select id="sp-clock_day" onchange="saveSprites()"></select>
+              </span>
+            </div>
+            <div class="list-row">
+              <span>Reloj (Noche)</span>
+              <span class="poke-select-wrap">
+                <span class="poke-dot" id="dot-clock_night"></span>
+                <select id="sp-clock_night" onchange="saveSprites()"></select>
+              </span>
+            </div>
+            <div class="list-row">
+              <span>Clima</span>
+              <span class="poke-select-wrap">
+                <span class="poke-dot" id="dot-weather"></span>
+                <select id="sp-weather" onchange="saveSprites()"></select>
+              </span>
+            </div>
+            <div class="list-row">
+              <span>Gemini Tokens</span>
+              <span class="poke-select-wrap">
+                <span class="poke-dot" id="dot-gemini"></span>
+                <select id="sp-gemini" onchange="saveSprites()"></select>
+              </span>
+            </div>
+            <div class="list-row">
+              <span>Spotify</span>
+              <span class="poke-select-wrap">
+                <span class="poke-dot" id="dot-spotify"></span>
+                <select id="sp-spotify" onchange="saveSprites()"></select>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 1: AVISOS POKÉMON -->
+        <div id="panel-alerts" class="tab-panel" role="tabpanel" aria-labelledby="tab-1">
+          <div class="field">
+            <label for="nTitle">Título del aviso</label>
+            <input type="text" id="nTitle" placeholder="Ej. BUILD OK" maxlength="24">
+          </div>
+
+          <div class="field">
+            <label for="nMsg">Mensaje en pantalla</label>
+            <input type="text" id="nMsg" placeholder="Ej. Tests 100% verdes y listo para deploy" maxlength="80">
+          </div>
+
+          <div class="field">
+            <label>Pokémon mensajero</label>
+            <div class="chip-group" id="notifyPokeChips" role="radiogroup" aria-label="Elegir Pokémon"></div>
+          </div>
+
+          <div class="field">
+            <label>Duración en pantalla</label>
+            <div class="chip-group" id="ttlChips" role="radiogroup" aria-label="Duración del aviso">
+              <button type="button" class="poke-chip" data-ttl="5" onclick="selectTtl(5)">5 seg</button>
+              <button type="button" class="poke-chip active" data-ttl="12" onclick="selectTtl(12)">12 seg</button>
+              <button type="button" class="poke-chip" data-ttl="30" onclick="selectTtl(30)">30 seg</button>
+              <button type="button" class="poke-chip" data-ttl="60" onclick="selectTtl(60)">60 seg</button>
+            </div>
+          </div>
+
+          <button type="button" id="sendNotifyBtn" class="primary-btn" onclick="sendNotify()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            <span id="sendNotifyLabel">Enviar aviso al instante</span>
+          </button>
+        </div>
+
+        <!-- TAB 2: AJUSTES -->
+        <div id="panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-2">
+          <h3 class="sub-title">Rotación y prioridades</h3>
+          <div class="list-group">
+            <div class="list-row">
+              <span>Reloj en rotación</span>
+              <label class="switch"><input type="checkbox" id="en-clock" onchange="saveCustom()"><span class="switch-track"></span></label>
+            </div>
+            <div class="list-row">
+              <span>Clima en rotación</span>
+              <label class="switch"><input type="checkbox" id="en-weather" onchange="saveCustom()"><span class="switch-track"></span></label>
+            </div>
+            <div class="list-row">
+              <span>Gemini Tokens en rotación</span>
+              <label class="switch"><input type="checkbox" id="en-gemini" onchange="saveCustom()"><span class="switch-track"></span></label>
+            </div>
+            <div class="list-row">
+              <div class="row-label">
+                <strong>Prioridad exclusiva Spotify</strong>
+                <small>Muestra la canción automáticamente al reproducir</small>
+              </div>
+              <label class="switch"><input type="checkbox" id="en-spprio" onchange="saveCustom()"><span class="switch-track"></span></label>
+            </div>
+            <div class="list-row">
+              <span>Intervalo de rotación</span>
+              <select id="rotInt" onchange="saveCustom()">
+                <option value="5">5 segundos</option>
+                <option value="10">10 segundos</option>
+                <option value="12">12 segundos</option>
+                <option value="20">20 segundos</option>
+                <option value="30">30 segundos</option>
+                <option value="60">60 segundos</option>
+              </select>
+            </div>
+          </div>
+
+          <h3 class="sub-title spaced">Entrenador, región y horario nocturno</h3>
+          <div class="list-group">
+            <div class="list-row">
+              <span>Nombre en reloj</span>
+              <input type="text" id="trainerName" placeholder="POKEGEAR" maxlength="10">
+            </div>
+            <div class="list-row">
+              <div class="row-label">
+                <strong>Ciudad (clima)</strong>
+                <small>También se sincroniza al modo offline del reloj</small>
+              </div>
+              <input type="text" id="cityName" placeholder="Paracas">
+            </div>
+            <div class="list-row">
+              <span>Unidad de temperatura</span>
+              <div class="seg-mini">
+                <button type="button" id="unit-c" onclick="setUnit(true)">°C</button>
+                <button type="button" id="unit-f" onclick="setUnit(false)">°F</button>
+              </div>
+            </div>
+            <div class="list-row">
+              <span>Formato de hora</span>
+              <div class="seg-mini">
+                <button type="button" id="hr-12" onclick="setHour12(true)">12h</button>
+                <button type="button" id="hr-24" onclick="setHour12(false)">24h</button>
+              </div>
+            </div>
+            <div class="list-row">
+              <div class="row-label">
+                <strong>Modo nocturno</strong>
+                <small>Reduce el brillo automáticamente de noche</small>
+              </div>
+              <label class="switch"><input type="checkbox" id="nightMode" onchange="saveCustom()"><span class="switch-track"></span></label>
+            </div>
+            <div class="list-row">
+              <span>Horario (Inicio / Fin / Brillo %)</span>
+              <div class="night-inputs">
+                <input type="number" id="nightStart" min="0" max="23" value="23" aria-label="Hora inicio nocturno">
+                <input type="number" id="nightEnd" min="0" max="23" value="7" aria-label="Hora fin nocturno">
+                <input type="number" id="nightBright" min="1" max="100" value="18" aria-label="Brillo nocturno">
+              </div>
+            </div>
+          </div>
+
+          <button type="button" class="secondary-btn" onclick="saveCustom(true)">Guardar nombre, ciudad y horario</button>
+
+          <div class="offline-note" id="offlineNote">
+            <span>Clima autónomo (PC apagada): sincronizado cada 15 min directo por Wi-Fi</span>
+            <span class="mono-readout" id="offlineWeatherReadout">--</span>
+          </div>
+        </div>
+      </section>
     </div>
+  </main>
+</div>
+
+<div class="toast-host" aria-live="polite">
+  <div id="toast" class="toast" role="status">
+    <span class="toast-dot" aria-hidden="true"></span>
+    <span id="toastMsg"></span>
   </div>
 </div>
 
-<div id="toast" class="toast"></div>
-
 <script>
 const $ = id => document.getElementById(id);
+
 const SPRITES = [
-  ['pikachu', 'Pikachu'], ['charmander', 'Charmander'], ['squirtle', 'Squirtle'],
-  ['bulbasaur', 'Bulbasaur'], ['gengar', 'Gengar'], ['snorlax', 'Snorlax'], ['jigglypuff', 'Jigglypuff']
+  ['pikachu', 'Pikachu', '#F8B800'],
+  ['charmander', 'Charmander', '#F87828'],
+  ['squirtle', 'Squirtle', '#3898F8'],
+  ['bulbasaur', 'Bulbasaur', '#30A848'],
+  ['gengar', 'Gengar', '#7858A8'],
+  ['snorlax', 'Snorlax', '#387888'],
+  ['jigglypuff', 'Jigglypuff', '#E078A0'],
 ];
 
-function initSpriteSelects() {
+const SPRITE_COLOR = Object.fromEntries(SPRITES.map(([k, , c]) => [k, c]));
+SPRITE_COLOR.auto = '#225AD6';
+
+const CARD_NAMES = {
+  clock: 'Reloj',
+  weather: 'Clima',
+  gemini: 'Gemini',
+  spotify: 'Spotify',
+  notify: 'Aviso',
+};
+
+let state = {
+  celsius: true,
+  hour12: true,
+  rotation: 0,
+  notifyPoke: 'pikachu',
+  notifyTtl: 12,
+  animations: true,
+  activeCard: '',
+  firstLoad: true,
+};
+
+function initControls() {
+  // Sprite dropdowns
   ['clock_day', 'clock_night', 'gemini', 'spotify', 'weather'].forEach(k => {
     const sel = $('sp-' + k);
     sel.innerHTML = '';
     if (k === 'weather') {
       const o = document.createElement('option');
-      o.value = 'auto'; o.textContent = 'Automático (clima)';
+      o.value = 'auto';
+      o.textContent = 'Automático (clima)';
       sel.appendChild(o);
     }
     SPRITES.forEach(([v, lbl]) => {
       const o = document.createElement('option');
-      o.value = v; o.textContent = lbl;
+      o.value = v;
+      o.textContent = lbl;
       sel.appendChild(o);
     });
   });
-}
-initSpriteSelects();
 
-function toast(msg) {
-  const el = $('toast');
-  el.textContent = msg;
-  el.style.display = 'block';
-  clearTimeout(window._tt);
-  window._tt = setTimeout(() => el.style.display = 'none', 2000);
+  // Notify Pokémon pill selector
+  const host = $('notifyPokeChips');
+  host.innerHTML = '';
+  SPRITES.forEach(([v, lbl, col]) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'poke-chip' + (v === state.notifyPoke ? ' active' : '');
+    btn.dataset.poke = v;
+    btn.innerHTML = `<span class="poke-dot" style="background:${col}"></span>${lbl}`;
+    btn.onclick = () => {
+      state.notifyPoke = v;
+      host.querySelectorAll('.poke-chip').forEach(b => b.classList.toggle('active', b.dataset.poke === v));
+    };
+    host.appendChild(btn);
+  });
 }
+initControls();
+
+function updateSpriteDots() {
+  ['clock_day', 'clock_night', 'gemini', 'spotify', 'weather'].forEach(k => {
+    const val = $('sp-' + k).value;
+    $('dot-' + k).style.background = SPRITE_COLOR[val] || '#6C7180';
+  });
+}
+
+function selectTtl(sec) {
+  state.notifyTtl = sec;
+  $('ttlChips').querySelectorAll('.poke-chip').forEach(b => {
+    b.classList.toggle('active', Number(b.dataset.ttl) === sec);
+  });
+}
+
+// Tabs with Emil Kowalski sliding indicator
+let currentTab = 0;
+function switchTab(idx) {
+  currentTab = idx;
+  $('tabIndicator').style.transform = `translateX(${idx * 100}%)`;
+  const panels = ['panel-look', 'panel-alerts', 'panel-settings'];
+  panels.forEach((pid, i) => {
+    $('tab-' + i).setAttribute('aria-selected', String(i === idx));
+    $(pid).classList.toggle('active', i === idx);
+  });
+}
+
+// Interruptible Sonner-style toast (pauses when hovered or tab is hidden)
+let toastTimer = null;
+let toastRemaining = 0;
+let toastStartedAt = 0;
+let toastHovered = false;
+
+function scheduleToastHide(ms) {
+  clearTimeout(toastTimer);
+  toastRemaining = ms;
+  toastStartedAt = Date.now();
+  toastTimer = setTimeout(() => {
+    if (!toastHovered && !document.hidden) {
+      $('toast').classList.remove('open');
+    }
+  }, ms);
+}
+
+function toast(msg, isError = false) {
+  const el = $('toast');
+  $('toastMsg').textContent = msg;
+  el.classList.toggle('error', isError);
+  el.classList.add('open');
+  scheduleToastHide(2400);
+}
+
+$('toast').addEventListener('mouseenter', () => {
+  toastHovered = true;
+  toastRemaining = Math.max(400, toastRemaining - (Date.now() - toastStartedAt));
+  clearTimeout(toastTimer);
+});
+$('toast').addEventListener('mouseleave', () => {
+  toastHovered = false;
+  if ($('toast').classList.contains('open')) scheduleToastHide(toastRemaining);
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    toastRemaining = Math.max(400, toastRemaining - (Date.now() - toastStartedAt));
+    clearTimeout(toastTimer);
+  } else {
+    if ($('toast').classList.contains('open') && !toastHovered) scheduleToastHide(toastRemaining);
+    refresh(true);
+  }
+});
+
+// Smooth blur-mask preview swap only on intentional screen change
+function updatePreviewImg(blurSwap = false) {
+  const img = $('liveImg');
+  if (blurSwap) img.classList.add('swapping');
+  const next = new Image();
+  next.onload = () => {
+    img.src = next.src;
+    if (blurSwap) requestAnimationFrame(() => img.classList.remove('swapping'));
+  };
+  next.onerror = () => {
+    if (blurSwap) img.classList.remove('swapping');
+  };
+  next.src = '/api/preview/active?t=' + Date.now();
+}
+
 async function post(url, body = {}) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
   return res.json();
 }
-async function showCard(card) {
+
+async function showCard(card, fromKeyboard = false) {
+  const btn = $('btn-' + card);
+  if (fromKeyboard && btn) {
+    btn.setAttribute('data-instant', '');
+    requestAnimationFrame(() => btn.removeAttribute('data-instant'));
+  }
   const r = await post('/api/show', { card });
-  toast(r.ok ? `Mostrando ${card} (${r.pc_ms || 0} ms)` : `Error: ${r.error}`);
-  refresh();
+  if (r.ok) {
+    toast(`Mostrando ${CARD_NAMES[card] || card} (${r.pc_ms || 0} ms)`);
+    updatePreviewImg(true);
+    refresh(false);
+  } else {
+    toast(r.error || 'No se pudo cambiar la pantalla', true);
+  }
 }
-async function setAuto() {
+
+async function setAuto(fromKeyboard = false) {
   const r = await post('/api/auto');
-  toast(`Modo automático (${r.card || ''})`);
-  refresh();
+  toast(`Modo automático (${CARD_NAMES[r.card] || r.card || 'activo'})`);
+  updatePreviewImg(true);
+  refresh(false);
 }
+
+async function forceRefreshData() {
+  const btn = $('refreshBtn');
+  btn.classList.add('spinning');
+  try {
+    await post('/api/refresh');
+    toast('Datos actualizados');
+    await refresh(true);
+  } catch (e) {
+    toast('Error al actualizar', true);
+  } finally {
+    setTimeout(() => btn.classList.remove('spinning'), 350);
+  }
+}
+
 async function setPalette(pal) {
   await post('/api/config', { palette: pal });
-  toast(`Paleta: ${pal}`);
-  refresh();
+  toast('Paleta aplicada');
+  updatePreviewImg(true);
+  refresh(false);
 }
+
 async function saveSprites() {
+  updateSpriteDots();
   await post('/api/config', {
     sprites: {
       clock_day: $('sp-clock_day').value,
       clock_night: $('sp-clock_night').value,
       weather: $('sp-weather').value,
       gemini: $('sp-gemini').value,
-      spotify: $('sp-spotify').value
-    }
+      spotify: $('sp-spotify').value,
+    },
   });
-  toast('Pokémon actualizados');
-  refresh();
+  toast('Compañero Pokémon actualizado');
+  updatePreviewImg(true);
+  refresh(false);
 }
-async function saveCustom() {
+
+function setUnit(celsius) {
+  state.celsius = celsius;
+  $('unit-c').classList.toggle('active', celsius);
+  $('unit-f').classList.toggle('active', !celsius);
+  saveCustom();
+}
+
+function setHour12(hour12) {
+  state.hour12 = hour12;
+  $('hr-12').classList.toggle('active', hour12);
+  $('hr-24').classList.toggle('active', !hour12);
+  saveCustom();
+}
+
+async function saveCustom(explicit = false) {
   await post('/api/config', {
     enabled_cards: {
       clock: $('en-clock').checked,
       weather: $('en-weather').checked,
-      gemini: $('en-gemini').checked
+      gemini: $('en-gemini').checked,
     },
     spotify_priority: $('en-spprio').checked,
+    animations: $('en-anim').checked,
     rotate_interval: parseInt($('rotInt').value, 10),
     trainer_name: $('trainerName').value.trim() || 'POKEGEAR',
     city: $('cityName').value.trim() || 'Paracas',
-    celsius: $('useCelsius').checked,
-    hour12: $('useHour12').checked,
+    celsius: state.celsius,
+    hour12: state.hour12,
     auto_night_palette: $('autoNightPal').checked,
     night_mode: $('nightMode').checked,
     night_start: parseInt($('nightStart').value, 10) || 23,
     night_end: parseInt($('nightEnd').value, 10) || 7,
-    night_brightness: parseInt($('nightBright').value, 10) || 18
+    night_brightness: parseInt($('nightBright').value, 10) || 18,
   });
-  toast('Personalización aplicada');
-  refresh();
+  toast(explicit ? 'Ajustes guardados y sincronizados' : 'Preferencia aplicada');
+  refresh(true);
 }
+
 async function setRot(val) {
+  state.rotation = val;
+  [0, 1, 2, 3].forEach(i => $('rot-' + i).classList.toggle('active', i === val));
   await post('/api/rotation', { val });
   toast(`Rotación ${val * 90}°`);
 }
+
 async function sendNotify() {
-  const title = $('nTitle').value.trim() || 'AVISO!';
-  const message = $('nMsg').value.trim() || 'Mensaje desde Poké-Hub';
-  const pokemon = $('nPoke').value;
-  const ttl = parseInt($('nTtl').value, 10) || 12;
-  const r = await post('/api/notify', { title, message, pokemon, ttl });
-  toast(r.ok ? `Aviso enviado (${r.pc_ms || 0} ms)` : `Error: ${r.error}`);
-  refresh();
+  const btn = $('sendNotifyBtn');
+  const lbl = $('sendNotifyLabel');
+  btn.disabled = true;
+  lbl.textContent = 'Enviando...';
+  try {
+    const title = $('nTitle').value.trim() || 'AVISO!';
+    const message = $('nMsg').value.trim() || 'Mensaje desde Poké-Hub';
+    const r = await post('/api/notify', {
+      title,
+      message,
+      pokemon: state.notifyPoke,
+      ttl: state.notifyTtl,
+    });
+    if (r.ok) {
+      toast(`Aviso enviado (${r.pc_ms || 0} ms)`);
+      updatePreviewImg(true);
+      refresh(false);
+    } else {
+      toast(r.error || 'Error enviando aviso', true);
+    }
+  } finally {
+    btn.disabled = false;
+    lbl.textContent = 'Enviar aviso al instante';
+  }
 }
+
+// Tactile brightness slider with live gradient fill
+function paintRangeTrack(val) {
+  $('brightRange').style.background =
+    `linear-gradient(to right, var(--cobalt) 0%, var(--cobalt) ${val}%, var(--canvas-recessed) ${val}%, var(--canvas-recessed) 100%)`;
+}
+
 let brightTimer = null;
 $('brightRange').addEventListener('input', e => {
-  $('brightVal').textContent = e.target.value;
+  const val = parseInt(e.target.value, 10);
+  $('brightVal').textContent = val;
+  paintRangeTrack(val);
   clearTimeout(brightTimer);
-  brightTimer = setTimeout(() => post('/api/brightness', { val: parseInt(e.target.value, 10) }), 120);
+  brightTimer = setTimeout(() => post('/api/brightness', { val }), 110);
 });
 
-let firstLoad = true;
-async function refresh() {
+// Keyboard shortcuts (zero animation delay per Emil Kowalski framework)
+document.addEventListener('keydown', e => {
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === '1') showCard('clock', true);
+  else if (e.key === '2') showCard('weather', true);
+  else if (e.key === '3') showCard('gemini', true);
+  else if (e.key === '4') showCard('spotify', true);
+  else if (e.key === 'a' || e.key === 'A') setAuto(true);
+});
+
+async function refresh(withPreview = true) {
+  if (document.hidden) return;
   try {
     const st = await (await fetch('/api/status')).json();
-    const online = st.device && st.device.online !== false;
-    $('statusBadge').textContent = `${st.driver.toUpperCase()} · ${online ? 'ONLINE' : 'OFFLINE'}`;
-    $('statusBadge').className = 'badge' + (online ? '' : ' off');
+    const dev = st.device || {};
+    const online = dev.online !== false;
+
+    $('statusBadge').className = 'status-pill' + (online ? '' : ' offline');
+    $('statusText').textContent = online ? 'En línea' : 'Sin señal';
+    $('powerLed').className = 'power-led' + (online ? '' : ' off');
+    $('fwLabel').textContent = dev.version ? `RAM v${dev.version}` : (st.driver || 'RAM').toUpperCase();
+
     if (st.hub && st.hub.url) {
       $('domainChip').href = st.hub.url;
-      $('domainChip').textContent = st.hub.url.replace(/^https?:\/\//, '');
+      $('domainText').textContent = st.hub.url.replace(/^https?:\/\//, '');
     }
-    $('liveImg').src = '/api/preview/active?t=' + Date.now();
-    const sp = st.spotify ? `♪ ${st.spotify.title} — ${st.spotify.artist}` : 'Spotify inactivo';
-    const ms = st.device && st.device.last_push_ms ? `${st.device.last_push_ms} ms` : '-';
-    $('liveMeta').innerHTML = `Vista: <b>${st.active_card}</b> (${st.active_reason}) · Push: <b>${ms}</b><br>${sp}`;
-    ['clock','weather','gemini','spotify'].forEach(c => {
+
+    const cardChanged = state.activeCard && state.activeCard !== st.active_card;
+    state.activeCard = st.active_card;
+    if (withPreview) updatePreviewImg(cardChanged);
+
+    const cardName = CARD_NAMES[st.active_card] || st.active_card;
+    $('telMode').textContent = cardName;
+    $('activeLabel').textContent = st.pinned_card ? `FIJO · ${cardName.toUpperCase()}` : `AUTO · ${cardName.toUpperCase()}`;
+
+    const ms = dev.last_ms || dev.last_push_ms;
+    $('telLatency').textContent = ms ? `${ms} ms` : '-- ms';
+
+    const w = st.weather || {};
+    if (w.temp != null) {
+      const c = st.config ? !!st.config.celsius : true;
+      const t = c ? w.temp : (w.temp * 9 / 5 + 32);
+      $('telTemp').textContent = `${Math.round(t)}°${c ? 'C' : 'F'}`;
+      $('telCity').textContent = (w.city || 'Clima').slice(0, 12);
+    }
+
+    const spStrip = $('spotifyStrip');
+    if (st.spotify) {
+      spStrip.classList.add('playing');
+      $('spotifyText').textContent = `${st.spotify.title} — ${st.spotify.artist}`;
+    } else {
+      spStrip.classList.remove('playing');
+      $('spotifyText').textContent = 'Spotify en pausa';
+    }
+
+    if (dev.offline_city) {
+      const offDesc = dev.offline_weather_ok
+        ? `${dev.offline_city} ${Math.round(dev.offline_temp_c)}°C (${dev.offline_desc || 'OK'})`
+        : `${dev.offline_city} listo`;
+      $('offlineWeatherReadout').textContent = offDesc;
+    }
+
+    ['clock', 'weather', 'gemini', 'spotify'].forEach(c => {
       $('btn-' + c).classList.toggle('active', st.active_card === c);
     });
+    const isAuto = !st.pinned_card && st.active_reason !== 'notify';
+    $('btn-auto').classList.toggle('active', isAuto);
+    $('autoText').textContent = isAuto ? 'Rotación automática activa' : 'Volver a rotación automática';
+
     if (st.config) {
       const c = st.config;
-      ['gbc_classic','gbc_dark','gb_green','pokedex_red'].forEach(p => {
+      state.animations = c.animations !== false;
+      state.celsius = !!c.celsius;
+      state.hour12 = !!c.hour12;
+      state.rotation = Number(c.rotation || 0);
+
+      ['gbc_classic', 'gbc_dark', 'gb_green', 'pokedex_red'].forEach(p => {
         $('pal-' + p).classList.toggle('active', c.palette === p);
       });
+      [0, 1, 2, 3].forEach(i => $('rot-' + i).classList.toggle('active', i === state.rotation));
+      $('unit-c').classList.toggle('active', state.celsius);
+      $('unit-f').classList.toggle('active', !state.celsius);
+      $('hr-12').classList.toggle('active', state.hour12);
+      $('hr-24').classList.toggle('active', !state.hour12);
+
       $('en-clock').checked = !!c.enabled_cards.clock;
       $('en-weather').checked = !!c.enabled_cards.weather;
       $('en-gemini').checked = !!c.enabled_cards.gemini;
       $('en-spprio').checked = !!c.spotify_priority;
+      $('en-anim').checked = state.animations;
       $('rotInt').value = String(c.rotate_interval || 12);
-      $('useCelsius').checked = !!c.celsius;
-      $('useHour12').checked = !!c.hour12;
       $('autoNightPal').checked = !!c.auto_night_palette;
       $('nightMode').checked = !!c.night_mode;
-      if (firstLoad) {
+
+      if (state.firstLoad) {
         $('trainerName').value = c.trainer_name || 'POKEGEAR';
         $('cityName').value = c.city || 'Paracas';
         $('nightStart').value = c.night_start ?? 23;
@@ -448,21 +2043,35 @@ async function refresh() {
           Object.entries(c.sprites).forEach(([k, v]) => {
             if ($('sp-' + k)) $('sp-' + k).value = v;
           });
+          updateSpriteDots();
         }
-        firstLoad = false;
+        state.firstLoad = false;
       }
+
       if (document.activeElement !== $('brightRange')) {
-        $('brightRange').value = c.brightness ?? 95;
-        $('brightVal').textContent = c.brightness ?? 95;
+        const b = c.brightness ?? 95;
+        $('brightRange').value = b;
+        $('brightVal').textContent = b;
+        paintRangeTrack(b);
       }
     }
   } catch (e) {
-    $('statusBadge').textContent = 'HUB OFFLINE';
-    $('statusBadge').className = 'badge off';
+    $('statusBadge').className = 'status-pill offline';
+    $('statusText').textContent = 'Hub desconectado';
+    $('powerLed').className = 'power-led off';
   }
 }
-refresh();
-setInterval(refresh, 3000);
+
+paintRangeTrack(95);
+refresh(true);
+
+// Live preview cadence: ~700ms when animations are active, 3s when static (pauses when hidden)
+setInterval(() => {
+  if (!document.hidden && state.animations) {
+    updatePreviewImg(false);
+  }
+}, 700);
+setInterval(() => refresh(false), 3000);
 </script>
 </body>
 </html>
