@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,6 +23,38 @@ from hub.mdns_publisher import MdnsPublisher
 from hub.state_engine import PokeHubEngine
 
 UI_HTML_PATH = Path(__file__).resolve().parent / "ui.html"
+_UI_CACHE_LOCK = threading.Lock()
+_UI_CACHE: tuple[int, bytes] | None = None
+
+
+def _get_ui_html() -> bytes:
+    """Return ui.html bytes cached in RAM, reloading only when mtime_ns changes."""
+    global _UI_CACHE
+    mtime_ns = UI_HTML_PATH.stat().st_mtime_ns
+    with _UI_CACHE_LOCK:
+        if _UI_CACHE is not None and _UI_CACHE[0] == mtime_ns:
+            return _UI_CACHE[1]
+    html = UI_HTML_PATH.read_bytes()
+    with _UI_CACHE_LOCK:
+        _UI_CACHE = (mtime_ns, html)
+    return html
+
+
+def _etag_matches(header_value: str, etag: str, etag_hash: str) -> bool:
+    """Check whether an If-None-Match header matches the current ETag."""
+    if not header_value or not etag:
+        return False
+    for raw_token in header_value.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        if token == etag or token.strip('"') == etag_hash:
+            return True
+    return False
 
 
 def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
@@ -49,13 +82,13 @@ def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, If-None-Match")
             self.end_headers()
 
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
-                html = UI_HTML_PATH.read_bytes()
+                html = _get_ui_html()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(html)))
@@ -72,13 +105,24 @@ def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
 
             if path.startswith("/api/preview/"):
                 card = path[len("/api/preview/"):].strip("/")
-                jpg = engine.get_preview(card)
+                jpg, etag_hash = engine.get_preview_with_etag(card)
                 if not jpg:
                     self._send_json(404, {"ok": False, "error": "preview unavailable"})
                     return
+                etag = f'"{etag_hash}"' if etag_hash else ""
+                if etag and _etag_matches(self.headers.get("If-None-Match", ""), etag, etag_hash):
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
-                self.send_header("Cache-Control", "no-store")
+                if etag:
+                    self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Content-Length", str(len(jpg)))
                 self.end_headers()
                 self.wfile.write(jpg)
@@ -106,14 +150,34 @@ def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
                     title = str(body.get("title") or "AVISO!")
                     message = str(body.get("message") or "")
                     pokemon = str(body.get("pokemon") or "pikachu")
-                    ttl = int(body.get("ttl") or 12)
-                    self._send_json(200, engine.send_notify(title, message, pokemon=pokemon, ttl=ttl))
+                    app_name = str(body.get("app_name") or "")
+                    raw_ttl = body.get("ttl")
+                    ttl = 12 if raw_ttl is None or raw_ttl == "" else int(raw_ttl)
+                    self._send_json(
+                        200,
+                        engine.send_notify(
+                            title,
+                            message,
+                            pokemon=pokemon,
+                            ttl=ttl,
+                            app_name=app_name,
+                            source="manual",
+                        ),
+                    )
+                elif path == "/api/notify/test-desktop":
+                    self._send_json(200, engine.test_desktop_notify())
                 elif path == "/api/refresh":
                     engine.refresh_all_data()
                     self._send_json(200, {"ok": True, "status": engine.get_status()})
                 elif path == "/api/brightness":
-                    level = int(body.get("val", 95))
-                    self._send_json(200, engine.update_config({"brightness": level}))
+                    raw_val = body.get("value")
+                    if raw_val is None or raw_val == "":
+                        raw_val = body.get("val")
+                    level = 95 if raw_val is None or raw_val == "" else int(raw_val)
+                    if hasattr(engine, "set_brightness"):
+                        self._send_json(200, engine.set_brightness(level))
+                    else:
+                        self._send_json(200, engine.update_config({"brightness": level}))
                 elif path == "/api/rotation":
                     rot = int(body.get("val", 0))
                     self._send_json(200, engine.update_config({"rotation": rot}))

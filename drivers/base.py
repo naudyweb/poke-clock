@@ -9,7 +9,7 @@ class DisplayDriver(ABC):
     name: str = "base"
 
     @abstractmethod
-    def push_frame(self, card_id: str, jpg_bytes: bytes, content_hash: str) -> dict:
+    def push_frame(self, card_id: str, jpg_bytes: bytes, content_hash: str, force: bool = False) -> dict:
         """Display the given 240x240 JPEG frame immediately on the screen."""
 
     @abstractmethod

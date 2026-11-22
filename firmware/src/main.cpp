@@ -1,25 +1,20 @@
 /**
- * PokeDisplay Thin RAM-Stream Firmware v1.3.0 for JUZIPi SD PRO (ESP8266 + ST7789 240x240)
+ * PokeDisplay Thin RAM-Stream Firmware v1.4.0 for JUZIPi SD PRO (ESP8266 + ST7789 240x240)
  *
  * Ultra-lean "Dumb Screen" receiver controlled by Poké-Hub on the PC, with autonomous
- * offline NTP clock + OpenWeatherMap weather updates AND persistent EEPROM offline cache:
+ * offline Pokémon GBC clock + OpenWeatherMap weather updates AND persistent EEPROM cache:
  *   - POST /frame          : Streams full 240x240 or partial (?x=&y=) baseline JPEG into static RAM
- *                            and blits to ST7789 via 40MHz SPI (~40-110ms, ZERO flash wear!)
+ *                            and blits to ST7789 via 40MHz SPI (ZERO flash wear!)
  *   - GET  /brightness     : ?val=0..100 (inverted PWM on GPIO5, debounced EEPROM persistence)
  *   - GET  /rotation       : ?val=0..3 (debounced EEPROM persistence)
- *   - GET  /offline_cfg    : Syncs offline city/key/units/12h/trainer name (+ optional weather snapshot)
- *                            from PC (persisted only on meaningful change)
+ *   - GET|POST /offline_cfg: Syncs offline city/key/units/12h/trainer/poke/pal/wicon (+ weather snapshot)
+ *                            from PC (wear-protected EEPROM persistence with hysteresis)
  *   - GET  /offline_weather: Triggers an autonomous weather fetch directly over Wi-Fi (persisted to EEPROM)
- *   - GET  /status         : Live JSON telemetry (RSSI, heap, frames, last_ms, standby, offline weather)
+ *   - GET|POST /standby    : Forces immediate transition to offline Pokémon GBC screen
+ *   - GET  /status         : Live JSON telemetry (RSSI, heap, frames, last_ms, standby, offline weather,
+ *                            weather diagnostics, active Pokémon/palette/weather icon)
  *   - GET  /               : Status page with direct link to Poké-Hub on your PC
  *   - GET  /ota            : Built-in Web OTA updater (update custom or restore stock SDP .bin)
- *   - Offline Persistence  : Saves config, brightness, rotation, and latest weather snapshot in EEPROM
- *                            with FNV-1a checksum so power/Wi-Fi loss immediately restores last weather!
- *   - Auto Weather Sync    : Automatically syncs weather shortly after boot, on Wi-Fi reconnect, and
- *                            every 15 min (without waiting for standby), persisting updates to EEPROM.
- *   - Resilient Recovery   : If Wi-Fi fails at boot (e.g. router booting after power outage), keeps
- *                            "PokeDisplay-OTA" AP alive while showing cached offline weather AND
- *                            continuously auto-reconnecting STA until Wi-Fi + NTP + weather recover!
  */
 
 #include <Arduino.h>
@@ -30,9 +25,12 @@
 #include <Updater.h>
 #include <math.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <time.h>
 #include <TFT_eSPI.h>
 #include <TJpg_Decoder.h>
+
+#include "poke_sprites.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -41,7 +39,7 @@
 #endif
 
 static const char* HOSTNAME      = "poke-display";
-static const char* FW_VERSION    = "1.3.0";
+static const char* FW_VERSION    = "1.4.0";
 static const long  TZ_OFFSET_SEC = -5 * 3600; // America/Lima (UTC-5)
 
 static constexpr size_t   MAX_FRAME_BYTES             = 24576;   // 24 KB static RAM buffer
@@ -49,12 +47,15 @@ static constexpr size_t   EEPROM_SIZE_BYTES           = 512;
 static constexpr uint32_t BOOT_STANDBY_TIMEOUT_MS     = 12000;   // 12s after boot if no PC -> Offline mode
 static constexpr uint32_t STANDBY_TIMEOUT_MS          = 90000;   // 90s without PC frame -> Offline mode
 static constexpr uint32_t AP_SPLASH_HOLD_MS           = 12000;   // Show AP recovery info 12s before offline screen
-static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS  = 15000;   // 15s STA reconnect retry (even in AP fallback)
+static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS  = 45000;   // 45s disconnect before manual WiFi.begin()
 static constexpr uint32_t OFFLINE_WEATHER_INTERVAL_MS = 900000;  // 15 min autonomous weather refresh
-static constexpr uint32_t OFFLINE_WEATHER_RETRY_MS    = 30000;   // 30s retry on transient Wi-Fi/WAN error
 static constexpr uint32_t EEPROM_SAVE_DEBOUNCE_MS     = 4000;    // 4s debounce for brightness/rotation writes
+static constexpr uint32_t WEATHER_HTTP_TIMEOUT_MS     = 6000;    // 6s OpenWeatherMap connect/read timeout
 static constexpr uint32_t EEPROM_MAGIC_V12            = 0x504B1201;
-static constexpr uint32_t EEPROM_MAGIC                = 0x504B1301;
+static constexpr uint32_t EEPROM_MAGIC_V13            = 0x504B1301;
+static constexpr uint32_t EEPROM_MAGIC                = 0x504B1401;
+
+static const uint32_t WEATHER_BACKOFF_MS[4] = {30000UL, 60000UL, 180000UL, 900000UL};
 
 struct OfflineConfigV12 {
     uint32_t magic;
@@ -65,7 +66,7 @@ struct OfflineConfigV12 {
     uint8_t hour12;
 };
 
-struct OfflineState {
+struct OfflineStateV13 {
     uint32_t magic;
     char city[40];
     char weatherKey[48];
@@ -74,7 +75,6 @@ struct OfflineState {
     uint8_t hour12;
     uint8_t brightness;
     uint8_t rotation;
-    // Persisted offline weather snapshot (survives power loss & Wi-Fi loss)
     uint8_t weatherValid;
     uint8_t reserved;
     int16_t humidity;
@@ -86,6 +86,30 @@ struct OfflineState {
     uint32_t checksum;
 };
 
+// Naturally aligned, zero implicit padding bytes
+struct OfflineState {
+    uint32_t magic;
+    char city[40];
+    char weatherKey[48];
+    char trainerName[16];
+    uint8_t celsius;
+    uint8_t hour12;
+    uint8_t brightness;
+    uint8_t rotation;
+    uint8_t weatherValid;
+    uint8_t pokemonIdx;
+    int16_t humidity;
+    float tempC;
+    char desc[28];
+    char cityResp[20];
+    char updatedHm[8];
+    uint32_t updatedEpoch;
+    uint8_t paletteIdx;
+    uint8_t weatherIcon;
+    uint16_t reserved;
+    uint32_t checksum;
+};
+
 static_assert(sizeof(OfflineState) <= EEPROM_SIZE_BYTES, "OfflineState exceeds EEPROM_SIZE_BYTES");
 
 static OfflineState offlineState;
@@ -93,31 +117,40 @@ static OfflineState offlineState;
 static uint8_t frameBuf[MAX_FRAME_BYTES];
 static size_t frameLen = 0;
 static bool frameOverflow = false;
+static uint8_t mcuYieldCounter = 0;
 
 TFT_eSPI tft = TFT_eSPI();
 ESP8266WebServer server(80);
 
-static uint8_t  currentBrightness   = 95;
-static uint8_t  currentRotation     = 0;
-static uint32_t frameCount          = 0;
-static uint32_t lastDecodeMs        = 0;
-static uint32_t bootMs              = 0;
-static uint32_t lastFrameMs         = 0;
-static bool     pcContacted         = false;
-static bool     wifiWasConnected    = false;
-static bool     apFallbackActive    = false;
-static uint32_t apStartedMs         = 0;
-static bool     standbyActive       = false;
-static int      lastStandbyMin      = -1;
-static bool     lastStandbyHasTime  = false;
-static bool     lastStandbyWifi     = false;
-static String   lastHubIp           = "";
+static uint8_t  currentBrightness      = 95;
+static uint8_t  currentRotation        = 0;
+static uint32_t frameCount             = 0;
+static uint32_t lastDecodeMs           = 0;
+static uint32_t bootMs                 = 0;
+static uint32_t lastFrameMs            = 0;
+static bool     pcContacted            = false;
+static bool     wifiWasConnected       = false;
+static bool     apFallbackActive       = false;
+static uint32_t apStartedMs            = 0;
+static uint32_t wifiDisconnectedSinceMs = 0;
+static uint32_t lastWifiBeginMs        = 0;
+
+static bool     standbyActive          = false;
+static bool     forceStandbyNow        = false;
+static bool     standbyNeedsFullRedraw = true;
+static int      lastStandbyMin         = -1;
+static int      lastStandbyMday        = -1;
+static int      lastStandbyMon         = -1;
+static int      lastStandbyWday        = -1;
+static bool     lastStandbyHasTime     = false;
+static bool     lastStandbyWifi        = false;
+static char     lastHubIp[16]          = "";
 
 // Debounced EEPROM save for brightness / rotation
-static bool     displayPrefsDirty   = false;
-static uint32_t displayPrefsDirtyMs = 0;
+static bool     displayPrefsDirty      = false;
+static uint32_t displayPrefsDirtyMs    = 0;
 
-// Autonomous offline weather state
+// Autonomous offline weather state & diagnostics
 static bool     offlineWeatherValid     = false;
 static bool     offlineWeatherFromCache = false;
 static bool     weatherSyncedThisBoot   = false;
@@ -125,18 +158,25 @@ static bool     weatherSyncRequested    = false;
 static uint32_t nextWeatherSyncMs       = 0;
 static float    offlineTempC            = 0.0f;
 static int      offlineHumidity         = 0;
-static String   offlineDesc             = "";
-static String   offlineCityResp         = "";
-static String   offlineWeatherUpdatedHm = "";
+static char     offlineDesc[28]         = "";
+static char     offlineCityResp[20]     = "";
+static char     offlineWeatherUpdatedHm[8] = "";
+static uint8_t  offlineWeatherIcon      = WEATHER_ICON_SUN;
 static uint32_t offlineWeatherEpoch     = 0;
 static uint32_t offlineWeatherUpdatedMs = 0;
 static uint32_t lastWeatherAttemptMs    = 0;
+static uint8_t  weatherFailCount        = 0;
+static int      lastWeatherHttpCode     = 0;
+static char     lastWeatherErr[20]      = "";
 
-static const char* DAYS_ES[7]   = {"DOM", "LUN", "MAR", "MIE", "JUE", "VIE", "SAB"};
+// Fixed HTTP body buffer for OpenWeatherMap (zero String heap reallocations)
+static char     weatherBody[2048];
+
+static const char* DAYS_ES[7]    = {"DOM", "LUN", "MAR", "MIE", "JUE", "VIE", "SAB"};
 static const char* MONTHS_ES[12] = {"ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"};
 
 // ============================================================
-// Offline State EEPROM Helpers (Checksummed & Wear-Protected)
+// Safe Fixed-Buffer & EEPROM Helpers
 // ============================================================
 static void copyStrSafe(char* dst, size_t dstSize, const char* src) {
     if (!dst || dstSize == 0) return;
@@ -148,9 +188,15 @@ static void copyStrSafe(char* dst, size_t dstSize, const char* src) {
     dst[dstSize - 1] = '\0';
 }
 
-static uint32_t calcStateChecksum(const OfflineState& st) {
+static void ipToStr(const IPAddress& ip, char* dst, size_t dstSize) {
+    if (!dst || dstSize == 0) return;
+    snprintf(dst, dstSize, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+}
+
+template <typename T>
+static uint32_t calcStructChecksum(const T& st) {
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&st);
-    const size_t len = offsetof(OfflineState, checksum);
+    const size_t len = offsetof(T, checksum);
     uint32_t hash = 2166136261UL;
     for (size_t i = 0; i < len; i++) {
         hash ^= bytes[i];
@@ -182,6 +228,9 @@ static void sanitizeOfflineState(OfflineState& st) {
     st.hour12 = st.hour12 ? 1 : 0;
     if (st.brightness > 100) st.brightness = 95;
     st.rotation = st.rotation & 3;
+    if (st.pokemonIdx >= POKE_SPRITE_COUNT) st.pokemonIdx = 0;
+    if (st.paletteIdx >= GBC_PALETTE_COUNT) st.paletteIdx = 0;
+    if (st.weatherIcon >= WEATHER_ICON_COUNT) st.weatherIcon = 0;
     st.reserved = 0;
 
     if (st.weatherValid != 1 || !isfinite(st.tempC) || st.tempC < -90.0f || st.tempC > 90.0f) {
@@ -197,7 +246,7 @@ static void sanitizeOfflineState(OfflineState& st) {
         if (st.humidity > 100) st.humidity = 100;
     }
 
-    st.checksum = calcStateChecksum(st);
+    st.checksum = calcStructChecksum(st);
 }
 
 static bool commitOfflineStateIfChanged(const OfflineState& rawNext) {
@@ -216,12 +265,46 @@ static void loadOfflineState() {
     OfflineState stored;
     EEPROM.get(0, stored);
 
-    bool validV13 = (stored.magic == EEPROM_MAGIC && stored.checksum == calcStateChecksum(stored));
-    if (validV13) {
+    const bool validV14 = (stored.magic == EEPROM_MAGIC &&
+                           stored.checksum == calcStructChecksum(stored));
+    if (validV14) {
         offlineState = stored;
         sanitizeOfflineState(offlineState);
+    } else if (stored.magic == EEPROM_MAGIC_V13) {
+        OfflineStateV13 oldV13;
+        EEPROM.get(0, oldV13);
+        memset(&offlineState, 0, sizeof(offlineState));
+        if (oldV13.checksum == calcStructChecksum(oldV13)) {
+            copyStrSafe(offlineState.city, sizeof(offlineState.city), oldV13.city);
+            copyStrSafe(offlineState.weatherKey, sizeof(offlineState.weatherKey), oldV13.weatherKey);
+            copyStrSafe(offlineState.trainerName, sizeof(offlineState.trainerName), oldV13.trainerName);
+            offlineState.celsius = oldV13.celsius ? 1 : 0;
+            offlineState.hour12 = oldV13.hour12 ? 1 : 0;
+            offlineState.brightness = oldV13.brightness;
+            offlineState.rotation = oldV13.rotation;
+            offlineState.weatherValid = oldV13.weatherValid;
+            offlineState.humidity = oldV13.humidity;
+            offlineState.tempC = oldV13.tempC;
+            copyStrSafe(offlineState.desc, sizeof(offlineState.desc), oldV13.desc);
+            copyStrSafe(offlineState.cityResp, sizeof(offlineState.cityResp), oldV13.cityResp);
+            copyStrSafe(offlineState.updatedHm, sizeof(offlineState.updatedHm), oldV13.updatedHm);
+            offlineState.updatedEpoch = oldV13.updatedEpoch;
+        } else {
+            copyStrSafe(offlineState.city, sizeof(offlineState.city), DEFAULT_WEATHER_CITY);
+            copyStrSafe(offlineState.weatherKey, sizeof(offlineState.weatherKey), DEFAULT_WEATHER_KEY);
+            copyStrSafe(offlineState.trainerName, sizeof(offlineState.trainerName), "POKEGEAR");
+            offlineState.celsius = 1;
+            offlineState.hour12 = 1;
+            offlineState.brightness = 95;
+            offlineState.rotation = 0;
+        }
+        offlineState.pokemonIdx = 0;
+        offlineState.paletteIdx = 0;
+        offlineState.weatherIcon = WEATHER_ICON_SUN;
+        sanitizeOfflineState(offlineState);
+        EEPROM.put(0, offlineState);
+        EEPROM.commit();
     } else if (stored.magic == EEPROM_MAGIC_V12) {
-        // Migrate existing v1.2 config seamlessly to v1.3
         OfflineConfigV12 oldCfg;
         EEPROM.get(0, oldCfg);
         memset(&offlineState, 0, sizeof(offlineState));
@@ -232,6 +315,9 @@ static void loadOfflineState() {
         offlineState.hour12 = oldCfg.hour12 ? 1 : 0;
         offlineState.brightness = 95;
         offlineState.rotation = 0;
+        offlineState.pokemonIdx = 0;
+        offlineState.paletteIdx = 0;
+        offlineState.weatherIcon = WEATHER_ICON_SUN;
         sanitizeOfflineState(offlineState);
         EEPROM.put(0, offlineState);
         EEPROM.commit();
@@ -244,6 +330,9 @@ static void loadOfflineState() {
         offlineState.hour12 = 1;
         offlineState.brightness = 95;
         offlineState.rotation = 0;
+        offlineState.pokemonIdx = 0;
+        offlineState.paletteIdx = 0;
+        offlineState.weatherIcon = WEATHER_ICON_SUN;
         sanitizeOfflineState(offlineState);
         EEPROM.put(0, offlineState);
         EEPROM.commit();
@@ -251,44 +340,50 @@ static void loadOfflineState() {
 
     currentBrightness = offlineState.brightness;
     currentRotation = offlineState.rotation;
+    offlineWeatherIcon = offlineState.weatherIcon;
 
     if (offlineState.weatherValid) {
         offlineWeatherValid = true;
         offlineWeatherFromCache = true;
         offlineTempC = offlineState.tempC;
         offlineHumidity = offlineState.humidity;
-        offlineDesc = String(offlineState.desc);
-        offlineCityResp = String(offlineState.cityResp);
-        if (offlineCityResp.length() == 0) {
-            offlineCityResp = String(offlineState.city);
-        }
-        offlineWeatherUpdatedHm = String(offlineState.updatedHm);
+        copyStrSafe(offlineDesc, sizeof(offlineDesc), offlineState.desc);
+        copyStrSafe(offlineCityResp, sizeof(offlineCityResp),
+                    offlineState.cityResp[0] != '\0' ? offlineState.cityResp : offlineState.city);
+        copyStrSafe(offlineWeatherUpdatedHm, sizeof(offlineWeatherUpdatedHm), offlineState.updatedHm);
         offlineWeatherEpoch = offlineState.updatedEpoch;
     } else {
         offlineWeatherValid = false;
         offlineWeatherFromCache = false;
+        offlineDesc[0] = '\0';
+        offlineCityResp[0] = '\0';
+        offlineWeatherUpdatedHm[0] = '\0';
     }
 }
 
-static bool persistWeatherSnapshot(bool forceWrite = false) {
+// Hysteresis shared between autonomous OWM fetches and PC /offline_cfg syncs:
+// Avoids EEPROM wear when temp delta < 0.5C, humidity delta < 3%, same city/desc/icon, and < 3600s elapsed.
+static bool applyWeatherSnapshotToState(OfflineState& next, bool forceWrite = false) {
     if (!offlineWeatherValid || !isfinite(offlineTempC)) return false;
 
     char descBuf[sizeof(offlineState.desc)];
     char cityBuf[sizeof(offlineState.cityResp)];
     char hmBuf[sizeof(offlineState.updatedHm)];
-    copyStrSafe(descBuf, sizeof(descBuf), offlineDesc.c_str());
-    copyStrSafe(cityBuf, sizeof(cityBuf), offlineCityResp.c_str());
-    copyStrSafe(hmBuf, sizeof(hmBuf), offlineWeatherUpdatedHm.c_str());
+    copyStrSafe(descBuf, sizeof(descBuf), offlineDesc);
+    copyStrSafe(cityBuf, sizeof(cityBuf), offlineCityResp);
+    copyStrSafe(hmBuf, sizeof(hmBuf), offlineWeatherUpdatedHm);
 
     bool meaningfulChange = forceWrite || (offlineState.weatherValid == 0);
     if (!meaningfulChange) {
-        if ((int)roundf(offlineState.tempC) != (int)roundf(offlineTempC) ||
-            fabsf(offlineState.tempC - offlineTempC) >= 0.4f) {
+        const int humDiff = abs((int)offlineState.humidity - offlineHumidity);
+        if (fabsf(offlineState.tempC - offlineTempC) >= 0.5f) {
             meaningfulChange = true;
-        } else if (offlineState.humidity != offlineHumidity) {
+        } else if (humDiff >= 3) {
             meaningfulChange = true;
         } else if (strcmp(offlineState.desc, descBuf) != 0 ||
                    strcmp(offlineState.cityResp, cityBuf) != 0) {
+            meaningfulChange = true;
+        } else if (offlineState.weatherIcon != offlineWeatherIcon) {
             meaningfulChange = true;
         } else if (offlineState.updatedHm[0] == '\0' && hmBuf[0] != '\0') {
             meaningfulChange = true;
@@ -304,14 +399,22 @@ static bool persistWeatherSnapshot(bool forceWrite = false) {
         return false;
     }
 
-    OfflineState next = offlineState;
     next.weatherValid = 1;
     next.tempC = offlineTempC;
     next.humidity = (int16_t)offlineHumidity;
+    next.weatherIcon = offlineWeatherIcon;
     copyStrSafe(next.desc, sizeof(next.desc), descBuf);
     copyStrSafe(next.cityResp, sizeof(next.cityResp), cityBuf);
     copyStrSafe(next.updatedHm, sizeof(next.updatedHm), hmBuf);
     next.updatedEpoch = offlineWeatherEpoch;
+    return true;
+}
+
+static bool persistWeatherSnapshot(bool forceWrite = false) {
+    OfflineState next = offlineState;
+    if (!applyWeatherSnapshotToState(next, forceWrite)) {
+        return false;
+    }
     return commitOfflineStateIfChanged(next);
 }
 
@@ -332,33 +435,45 @@ static void flushPendingDisplayPrefs(uint32_t now) {
 }
 
 // ============================================================
-// String & JSON Helpers for Autonomous Weather Fetch
+// Fixed-Buffer String, URL, and JSON Helpers
 // ============================================================
-static String urlEncodeParam(const char* src) {
-    String out;
-    if (!src) return out;
-    const char* hex = "0123456789ABCDEF";
-    while (*src) {
+static void urlEncodeTo(char* dst, size_t dstSize, const char* src) {
+    if (!dst || dstSize == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    static const char hex[] = "0123456789ABCDEF";
+    size_t out = 0;
+    while (*src && out + 1 < dstSize) {
         unsigned char c = (unsigned char)*src++;
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
             c == '-' || c == '_' || c == '.' || c == '~') {
-            out += (char)c;
+            dst[out++] = (char)c;
         } else {
-            out += '%';
-            out += hex[(c >> 4) & 0xF];
-            out += hex[c & 0xF];
+            if (out + 3 >= dstSize) break;
+            dst[out++] = '%';
+            dst[out++] = hex[(c >> 4) & 0x0F];
+            dst[out++] = hex[c & 0x0F];
         }
     }
-    return out;
+    dst[out] = '\0';
 }
 
-static String sanitizeAsciiUpper(const String& raw, size_t maxLen) {
-    String out;
-    out.reserve(maxLen + 1);
-    for (size_t i = 0; i < raw.length() && out.length() < maxLen; i++) {
-        uint8_t c = (uint8_t)raw[i];
-        if (c == 0xC3 && i + 1 < raw.length()) {
-            uint8_t c2 = (uint8_t)raw[++i];
+static void sanitizeAsciiUpperTo(char* dst, size_t dstSize, const char* src, size_t maxChars) {
+    if (!dst || dstSize == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    size_t limit = dstSize - 1;
+    if (maxChars < limit) limit = maxChars;
+
+    size_t out = 0;
+    for (size_t i = 0; src[i] != '\0' && out < limit; i++) {
+        uint8_t c = (uint8_t)src[i];
+        if (c == 0xC3 && src[i + 1] != '\0') {
+            uint8_t c2 = (uint8_t)src[++i];
             char repl = ' ';
             switch (c2) {
                 case 0xA1: case 0x81: case 0xA0: case 0x80: case 0xA4: case 0x84: repl = 'A'; break;
@@ -369,141 +484,398 @@ static String sanitizeAsciiUpper(const String& raw, size_t maxLen) {
                 case 0xB1: case 0x91: repl = 'N'; break;
                 default: repl = ' '; break;
             }
-            out += repl;
+            if (!(repl == ' ' && out == 0)) {
+                dst[out++] = repl;
+            }
         } else if (c >= 32 && c <= 126) {
             char ch = (char)c;
             if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 32);
-            out += ch;
+            if (!(ch == ' ' && out == 0)) {
+                dst[out++] = ch;
+            }
         }
     }
-    out.trim();
-    return out;
-}
-
-static String jsonEscape(const String& s) {
-    String out;
-    out.reserve(s.length() + 4);
-    for (size_t i = 0; i < s.length(); i++) {
-        char c = s[i];
-        if (c == '"' || c == '\\') out += '\\';
-        if ((uint8_t)c >= 32) out += c;
+    while (out > 0 && dst[out - 1] == ' ') {
+        out--;
     }
-    return out;
+    dst[out] = '\0';
 }
 
-static bool extractJsonFloat(const String& body, const char* key, float& outVal) {
-    int idx = body.indexOf(key);
-    if (idx < 0) return false;
-    idx += strlen(key);
-    while (idx < (int)body.length() && (body[idx] == ' ' || body[idx] == '"')) idx++;
-    int end = idx;
-    while (end < (int)body.length() && (isDigit(body[end]) || body[end] == '-' || body[end] == '.')) end++;
-    if (end <= idx) return false;
-    outVal = body.substring(idx, end).toFloat();
+static void jsonEscapeTo(char* dst, size_t dstSize, const char* src) {
+    if (!dst || dstSize == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    size_t out = 0;
+    while (*src && out + 1 < dstSize) {
+        uint8_t c = (uint8_t)*src++;
+        if (c < 32) continue;
+        if (c == '"' || c == '\\') {
+            if (out + 2 >= dstSize) break;
+            dst[out++] = '\\';
+        }
+        dst[out++] = (char)c;
+    }
+    dst[out] = '\0';
+}
+
+// Finds `"keyName"` followed by optional whitespace and `:` and returns pointer to value start.
+static const char* findJsonKeyValue(const char* body, const char* keyName) {
+    if (!body || !keyName || keyName[0] == '\0') return nullptr;
+    size_t klen = strlen(keyName);
+    const char* p = body;
+    while ((p = strchr(p, '"')) != nullptr) {
+        p++;
+        if (strncmp(p, keyName, klen) == 0 && p[klen] == '"') {
+            const char* q = p + klen + 1;
+            while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+            if (*q == ':') {
+                q++;
+                while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+                return q;
+            }
+        }
+    }
+    return nullptr;
+}
+
+static bool extractQuotedString(const char* valPtr, char* out, size_t outSize) {
+    if (!out || outSize == 0) return false;
+    out[0] = '\0';
+    if (!valPtr || *valPtr != '"') return false;
+    valPtr++;
+    size_t n = 0;
+    while (*valPtr && *valPtr != '"' && n + 1 < outSize) {
+        if (*valPtr == '\\' && valPtr[1] != '\0') {
+            valPtr++;
+        }
+        out[n++] = *valPtr++;
+    }
+    out[n] = '\0';
     return true;
 }
 
-static bool extractJsonUInt32(const String& body, const char* key, uint32_t& outVal) {
-    int idx = body.indexOf(key);
-    if (idx < 0) return false;
-    idx += strlen(key);
-    while (idx < (int)body.length() && body[idx] == ' ') idx++;
-    int end = idx;
-    while (end < (int)body.length() && isDigit(body[end])) end++;
-    if (end <= idx) return false;
-    outVal = (uint32_t)strtoul(body.substring(idx, end).c_str(), nullptr, 10);
+static bool extractJsonFloat(const char* body, const char* keyName, float& outVal) {
+    const char* p = findJsonKeyValue(body, keyName);
+    if (!p) return false;
+    if (*p == '"') p++;
+    char* endPtr = nullptr;
+    float v = strtof(p, &endPtr);
+    if (endPtr == p) return false;
+    outVal = v;
     return true;
 }
 
-static bool extractJsonString(const String& body, const char* key, String& outVal) {
-    int idx = body.indexOf(key);
-    if (idx < 0) return false;
-    idx += strlen(key);
-    int end = body.indexOf('"', idx);
-    if (end < 0) return false;
-    outVal = body.substring(idx, end);
+static bool extractJsonUInt32(const char* body, const char* keyName, uint32_t& outVal) {
+    const char* p = findJsonKeyValue(body, keyName);
+    if (!p) return false;
+    char* endPtr = nullptr;
+    unsigned long v = strtoul(p, &endPtr, 10);
+    if (endPtr == p) return false;
+    outVal = (uint32_t)v;
     return true;
 }
 
+static bool extractJsonString(const char* body, const char* keyName, char* out, size_t outSize) {
+    const char* p = findJsonKeyValue(body, keyName);
+    if (!p) return false;
+    return extractQuotedString(p, out, outSize);
+}
+
+static bool readLineFixed(WiFiClient& client, char* buf, size_t bufSize, uint32_t startMs, uint32_t timeoutMs) {
+    if (!buf || bufSize == 0) return false;
+    size_t len = 0;
+    bool gotAny = false;
+    while ((millis() - startMs) < timeoutMs) {
+        if (client.available()) {
+            int ch = client.read();
+            if (ch < 0) continue;
+            gotAny = true;
+            if (ch == '\n') break;
+            if (ch != '\r' && len + 1 < bufSize) {
+                buf[len++] = (char)ch;
+            }
+        } else if (!client.connected()) {
+            break;
+        } else {
+            delay(2);
+            yield();
+        }
+    }
+    buf[len] = '\0';
+    return gotAny;
+}
+
+static bool isNightTimeNow(uint32_t fallbackEpoch, const char* iconCode) {
+    time_t tnow = time(nullptr);
+    if (tnow > 1700000000) {
+        struct tm tinfo;
+        localtime_r(&tnow, &tinfo);
+        return (tinfo.tm_hour >= 19 || tinfo.tm_hour < 6);
+    }
+    if (fallbackEpoch > 1700000000UL) {
+        time_t localTs = (time_t)fallbackEpoch + TZ_OFFSET_SEC;
+        struct tm tinfo;
+        gmtime_r(&localTs, &tinfo);
+        return (tinfo.tm_hour >= 19 || tinfo.tm_hour < 6);
+    }
+    if (iconCode && iconCode[0] != '\0') {
+        size_t len = strlen(iconCode);
+        return (len > 0 && iconCode[len - 1] == 'n');
+    }
+    return false;
+}
+
+static uint8_t mapOwmIdToIcon(int weatherId, bool isNight) {
+    if (weatherId >= 200 && weatherId <= 299) return WEATHER_ICON_STORM;
+    if (weatherId >= 300 && weatherId <= 599) return WEATHER_ICON_RAIN;
+    if (weatherId >= 600 && weatherId <= 799) return WEATHER_ICON_CLOUD;
+    if (weatherId == 800) return isNight ? WEATHER_ICON_MOON : WEATHER_ICON_SUN;
+    if (weatherId >= 801 && weatherId <= 804) return WEATHER_ICON_CLOUD;
+    return isNight ? WEATHER_ICON_MOON : WEATHER_ICON_SUN;
+}
+
+static uint8_t inferWeatherIconFromDesc(const char* descUpper, bool isNight) {
+    if (!descUpper || descUpper[0] == '\0') {
+        return isNight ? WEATHER_ICON_MOON : WEATHER_ICON_SUN;
+    }
+    if (strstr(descUpper, "TORMENTA") || strstr(descUpper, "STORM") ||
+        strstr(descUpper, "THUNDER") || strstr(descUpper, "RAYO")) {
+        return WEATHER_ICON_STORM;
+    }
+    if (strstr(descUpper, "LLUV") || strstr(descUpper, "RAIN") ||
+        strstr(descUpper, "CHUBASCO") || strstr(descUpper, "DRIZZLE") ||
+        strstr(descUpper, "AGUACERO")) {
+        return WEATHER_ICON_RAIN;
+    }
+    if (strstr(descUpper, "NUBL") || strstr(descUpper, "NUBE") ||
+        strstr(descUpper, "CLOUD") || strstr(descUpper, "NIEBL") ||
+        strstr(descUpper, "BRUM") || strstr(descUpper, "OVERCAST") ||
+        strstr(descUpper, "CUBIERTO")) {
+        return WEATHER_ICON_CLOUD;
+    }
+    if (strstr(descUpper, "DESPEJ") || strstr(descUpper, "CLARO") ||
+        strstr(descUpper, "CLEAR") || strstr(descUpper, "SOL") ||
+        strstr(descUpper, "SUN")) {
+        return isNight ? WEATHER_ICON_MOON : WEATHER_ICON_SUN;
+    }
+    return isNight ? WEATHER_ICON_MOON : WEATHER_ICON_CLOUD;
+}
+
+static uint8_t parsePokeArg(const char* val) {
+    if (!val || val[0] == '\0') return offlineState.pokemonIdx;
+    if (val[0] >= '0' && val[0] <= '9') {
+        long v = strtol(val, nullptr, 10);
+        if (v >= 0 && v < POKE_SPRITE_COUNT) return (uint8_t)v;
+        return 0;
+    }
+    return pokeNameToIndex(val);
+}
+
+static uint8_t parsePaletteArg(const char* val) {
+    if (!val || val[0] == '\0') return offlineState.paletteIdx;
+    if (val[0] >= '0' && val[0] <= '9') {
+        long v = strtol(val, nullptr, 10);
+        if (v >= 0 && v < GBC_PALETTE_COUNT) return (uint8_t)v;
+        return 0;
+    }
+    return paletteNameToIndex(val);
+}
+
+static uint8_t parseWeatherIconArg(const char* val) {
+    if (!val || val[0] == '\0') return offlineState.weatherIcon;
+    if (val[0] >= '0' && val[0] <= '9') {
+        long v = strtol(val, nullptr, 10);
+        if (v >= 0 && v < WEATHER_ICON_COUNT) return (uint8_t)v;
+        return 0;
+    }
+    for (uint8_t i = 0; i < WEATHER_ICON_COUNT; ++i) {
+        if (_eqIgnoreCase(val, WEATHER_ICONS[i].name)) return i;
+    }
+    return 0;
+}
+
+static void noteWeatherFailure(const char* errCode) {
+    copyStrSafe(lastWeatherErr, sizeof(lastWeatherErr), errCode);
+    if (weatherFailCount < 4) {
+        weatherFailCount++;
+    }
+}
+
+// ============================================================
+// Autonomous OpenWeatherMap Fetch (Zero Heap String Churn)
+// ============================================================
 static bool fetchOfflineWeather() {
     lastWeatherAttemptMs = millis();
-    if (WiFi.status() != WL_CONNECTED) return false;
-    if (offlineState.city[0] == '\0' || offlineState.weatherKey[0] == '\0') return false;
 
-    WiFiClient client;
-    client.setTimeout(2500);
-    if (!client.connect("api.openweathermap.org", 80)) {
+    if (WiFi.status() != WL_CONNECTED) {
+        lastWeatherHttpCode = 0;
+        copyStrSafe(lastWeatherErr, sizeof(lastWeatherErr), "NO_WIFI");
+        return false;
+    }
+    if (offlineState.city[0] == '\0') {
+        lastWeatherHttpCode = 0;
+        copyStrSafe(lastWeatherErr, sizeof(lastWeatherErr), "NO_CITY");
+        return false;
+    }
+    if (offlineState.weatherKey[0] == '\0') {
+        lastWeatherHttpCode = 0;
+        copyStrSafe(lastWeatherErr, sizeof(lastWeatherErr), "NO_KEY");
         return false;
     }
 
-    String req;
-    req.reserve(240);
-    req += F("GET /data/2.5/weather?q=");
-    req += urlEncodeParam(offlineState.city);
-    req += F("&appid=");
-    req += urlEncodeParam(offlineState.weatherKey);
-    req += F("&units=metric&lang=es HTTP/1.0\r\n"
-             "Host: api.openweathermap.org\r\n"
-             "Connection: close\r\n\r\n");
-    client.print(req);
+    IPAddress owmIp;
+    if (!WiFi.hostByName("api.openweathermap.org", owmIp)) {
+        lastWeatherHttpCode = 0;
+        noteWeatherFailure("ERR_DNS");
+        return false;
+    }
 
-    // Wait for response
+    WiFiClient client;
+    client.setTimeout(WEATHER_HTTP_TIMEOUT_MS);
+    if (!client.connect(owmIp, 80)) {
+        lastWeatherHttpCode = 0;
+        noteWeatherFailure("CONN_ERR");
+        return false;
+    }
+
+    char cityEnc[124];
+    char keyEnc[148];
+    char reqBuf[420];
+    urlEncodeTo(cityEnc, sizeof(cityEnc), offlineState.city);
+    urlEncodeTo(keyEnc, sizeof(keyEnc), offlineState.weatherKey);
+
+    int reqLen = snprintf_P(
+        reqBuf, sizeof(reqBuf),
+        PSTR("GET /data/2.5/weather?q=%s&appid=%s&units=metric&lang=es HTTP/1.0\r\n"
+             "Host: api.openweathermap.org\r\n"
+             "Accept-Encoding: identity\r\n"
+             "User-Agent: PokeDisplay/1.4\r\n"
+             "Connection: close\r\n\r\n"),
+        cityEnc, keyEnc);
+    if (reqLen <= 0 || (size_t)reqLen >= sizeof(reqBuf)) {
+        client.stop();
+        lastWeatherHttpCode = 0;
+        noteWeatherFailure("REQ_ERR");
+        return false;
+    }
+    client.write(reinterpret_cast<const uint8_t*>(reqBuf), (size_t)reqLen);
+
     uint32_t t0 = millis();
-    while (client.connected() && !client.available() && (millis() - t0) < 2500) {
+    while (client.connected() && !client.available() && (millis() - t0) < WEATHER_HTTP_TIMEOUT_MS) {
         delay(10);
         yield();
     }
-
-    String statusLine = client.readStringUntil('\n');
-    if (statusLine.indexOf("200") < 0) {
+    if (!client.available()) {
         client.stop();
+        lastWeatherHttpCode = 0;
+        noteWeatherFailure("TIMEOUT");
         return false;
     }
 
-    // Skip HTTP headers
+    char lineBuf[128];
+    if (!readLineFixed(client, lineBuf, sizeof(lineBuf), t0, WEATHER_HTTP_TIMEOUT_MS)) {
+        client.stop();
+        lastWeatherHttpCode = 0;
+        noteWeatherFailure("TIMEOUT");
+        return false;
+    }
+
+    int httpCode = 0;
+    if (strncmp(lineBuf, "HTTP/", 5) == 0) {
+        const char* sp = strchr(lineBuf, ' ');
+        if (sp != nullptr) {
+            httpCode = atoi(sp + 1);
+        }
+    }
+    lastWeatherHttpCode = httpCode;
+    if (httpCode != 200) {
+        client.stop();
+        if (httpCode > 0) {
+            char codeErr[20];
+            snprintf(codeErr, sizeof(codeErr), "HTTP_%d", httpCode);
+            noteWeatherFailure(codeErr);
+        } else {
+            noteWeatherFailure("TIMEOUT");
+        }
+        return false;
+    }
+
+    // Skip HTTP headers until empty line
     while (client.connected() || client.available()) {
-        String hdr = client.readStringUntil('\n');
-        if (hdr == "\r" || hdr.length() == 0) break;
+        if (!readLineFixed(client, lineBuf, sizeof(lineBuf), t0, WEATHER_HTTP_TIMEOUT_MS)) {
+            break;
+        }
+        if (lineBuf[0] == '\0') {
+            break;
+        }
         yield();
     }
 
-    // Read JSON body in small chunks (bounded to protect heap)
-    String body;
-    body.reserve(1024);
-    char chunk[128];
-    t0 = millis();
-    while ((client.connected() || client.available()) && body.length() < 1536 && (millis() - t0) < 2500) {
+    // Read JSON body into static fixed buffer
+    size_t bodyLen = 0;
+    uint32_t bodyT0 = millis();
+    while ((client.connected() || client.available()) &&
+           bodyLen < sizeof(weatherBody) - 1 &&
+           (millis() - bodyT0) < WEATHER_HTTP_TIMEOUT_MS) {
         int avail = client.available();
         if (avail > 0) {
+            size_t rem = sizeof(weatherBody) - 1 - bodyLen;
             int toRead = avail;
-            if (toRead > (int)sizeof(chunk) - 1) toRead = sizeof(chunk) - 1;
-            int remaining = 1536 - (int)body.length();
-            if (toRead > remaining) toRead = remaining;
-            int n = client.read(reinterpret_cast<uint8_t*>(chunk), toRead);
+            if ((size_t)toRead > rem) toRead = (int)rem;
+            int n = client.read(reinterpret_cast<uint8_t*>(weatherBody + bodyLen), toRead);
             if (n > 0) {
-                chunk[n] = '\0';
-                body += chunk;
+                bodyLen += (size_t)n;
             }
         } else {
             delay(5);
         }
         yield();
     }
+    weatherBody[bodyLen] = '\0';
     client.stop();
+
+    if (bodyLen == 0) {
+        noteWeatherFailure("TIMEOUT");
+        return false;
+    }
 
     float tempVal = 0.0f;
     float humVal  = 0.0f;
     uint32_t dtVal = 0;
-    String descRaw;
-    String cityRaw;
+    char descRaw[64] = "";
+    char cityRaw[48] = "";
+    char iconCode[8] = "";
 
-    if (!extractJsonFloat(body, "\"temp\":", tempVal) || !isfinite(tempVal)) {
+    if (!extractJsonFloat(weatherBody, "temp", tempVal) || !isfinite(tempVal)) {
+        noteWeatherFailure("JSON_ERR");
         return false;
     }
-    extractJsonFloat(body, "\"humidity\":", humVal);
-    extractJsonString(body, "\"description\":\"", descRaw);
-    extractJsonString(body, "\"name\":\"", cityRaw);
-    extractJsonUInt32(body, "\"dt\":", dtVal);
+    extractJsonFloat(weatherBody, "humidity", humVal);
+    extractJsonString(weatherBody, "description", descRaw, sizeof(descRaw));
+    extractJsonString(weatherBody, "name", cityRaw, sizeof(cityRaw));
+    extractJsonUInt32(weatherBody, "dt", dtVal);
+
+    bool haveWeatherId = false;
+    int weatherId = 800;
+    const char* wSection = findJsonKeyValue(weatherBody, "weather");
+    if (wSection != nullptr) {
+        const char* wEnd = strchr(wSection, ']');
+        const char* idPtr = findJsonKeyValue(wSection, "id");
+        if (idPtr != nullptr && (wEnd == nullptr || idPtr < wEnd)) {
+            char* endp = nullptr;
+            long parsedId = strtol(idPtr, &endp, 10);
+            if (endp != idPtr) {
+                weatherId = (int)parsedId;
+                haveWeatherId = true;
+            }
+        }
+        const char* iconPtr = findJsonKeyValue(wSection, "icon");
+        if (iconPtr != nullptr && (wEnd == nullptr || iconPtr < wEnd) && *iconPtr == '"') {
+            extractQuotedString(iconPtr, iconCode, sizeof(iconCode));
+        }
+    }
 
     int humInt = (int)roundf(humVal);
     if (humInt < 0) humInt = 0;
@@ -511,28 +883,34 @@ static bool fetchOfflineWeather() {
 
     offlineTempC = tempVal;
     offlineHumidity = humInt;
-    offlineDesc = sanitizeAsciiUpper(descRaw, 22);
-    offlineCityResp = sanitizeAsciiUpper(cityRaw.length() > 0 ? cityRaw : String(offlineState.city), 14);
+    sanitizeAsciiUpperTo(offlineDesc, sizeof(offlineDesc), descRaw, 22);
+    sanitizeAsciiUpperTo(offlineCityResp, sizeof(offlineCityResp),
+                         cityRaw[0] != '\0' ? cityRaw : offlineState.city, 14);
+    const bool isNight = isNightTimeNow(dtVal, iconCode);
+    offlineWeatherIcon = haveWeatherId
+                             ? mapOwmIdToIcon(weatherId, isNight)
+                             : inferWeatherIconFromDesc(offlineDesc, isNight);
+
     offlineWeatherValid = true;
     offlineWeatherFromCache = false;
     weatherSyncedThisBoot = true;
     offlineWeatherUpdatedMs = millis();
+    weatherFailCount = 0;
+    lastWeatherErr[0] = '\0';
 
     time_t tnow = time(nullptr);
     if (tnow > 1700000000) {
         struct tm tinfo;
         localtime_r(&tnow, &tinfo);
-        char hm[8];
-        snprintf(hm, sizeof(hm), "%02d:%02d", tinfo.tm_hour, tinfo.tm_min);
-        offlineWeatherUpdatedHm = String(hm);
+        snprintf(offlineWeatherUpdatedHm, sizeof(offlineWeatherUpdatedHm),
+                 "%02d:%02d", tinfo.tm_hour, tinfo.tm_min);
         offlineWeatherEpoch = (uint32_t)tnow;
     } else if (dtVal > 1700000000UL) {
         time_t localTs = (time_t)dtVal + TZ_OFFSET_SEC;
         struct tm tinfo;
         gmtime_r(&localTs, &tinfo);
-        char hm[8];
-        snprintf(hm, sizeof(hm), "%02d:%02d", tinfo.tm_hour, tinfo.tm_min);
-        offlineWeatherUpdatedHm = String(hm);
+        snprintf(offlineWeatherUpdatedHm, sizeof(offlineWeatherUpdatedHm),
+                 "%02d:%02d", tinfo.tm_hour, tinfo.tm_min);
         offlineWeatherEpoch = dtVal;
     }
 
@@ -557,9 +935,11 @@ static void applyBrightness(uint8_t pct) {
 }
 
 static bool tftOutputCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
-    if (y >= tft.height()) return false;
+    if (x >= tft.width() || y >= tft.height()) return false;
     tft.pushImage(x, y, w, h, bitmap);
-    yield();
+    if ((++mcuYieldCounter & 7) == 0) {
+        yield();
+    }
     return true;
 }
 
@@ -569,12 +949,14 @@ static void drawSplash(const char* line1, const char* line2, const char* line3) 
     const uint16_t GOLD  = tft.color565(248, 184, 0);
     const uint16_t BLUE  = tft.color565(40, 104, 200);
 
+    tft.startWrite();
     tft.fillScreen(CREAM);
     tft.fillRect(0, 0, 240, 10, GOLD);
     tft.drawRect(8, 20, 224, 204, INK);
     tft.drawRect(10, 22, 220, 200, INK);
     tft.drawRect(14, 26, 212, 192, INK);
 
+    tft.setTextSize(1);
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(INK, CREAM);
     tft.drawString("POKE-DISPLAY", 120, 62, 2);
@@ -585,41 +967,36 @@ static void drawSplash(const char* line1, const char* line2, const char* line3) 
     tft.setTextColor(INK, CREAM);
     tft.drawString(line2, 120, 140, 2);
     tft.drawString(line3, 120, 174, 2);
+    tft.endWrite();
 }
 
-static void drawStandbyClock(const struct tm* t, bool hasTime, bool wifiOnline) {
-    const uint16_t CREAM = tft.color565(248, 248, 240);
-    const uint16_t WHITE = tft.color565(255, 255, 255);
-    const uint16_t INK   = tft.color565(24, 24, 32);
-    const uint16_t MUTED = tft.color565(96, 104, 112);
-    const uint16_t BLUE  = tft.color565(40, 104, 200);
-    const uint16_t GOLD  = tft.color565(248, 184, 0);
-    const uint16_t RED   = tft.color565(232, 56, 56);
-
-    tft.fillScreen(CREAM);
-    tft.fillRect(0, 0, 240, 8, GOLD);
-
-    // Header
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(INK, CREAM);
-    tft.drawString(offlineState.trainerName, 16, 28, 2);
-
-    tft.setTextDatum(MR_DATUM);
-    if (!wifiOnline) {
-        tft.setTextColor(RED, CREAM);
-        tft.drawString("SIN WIFI", 224, 28, 2);
-    } else if (!hasTime) {
-        tft.setTextColor(BLUE, CREAM);
-        tft.drawString("SIN NTP", 224, 28, 2);
-    } else {
-        tft.setTextColor(BLUE, CREAM);
-        tft.drawString("PC OFF", 224, 28, 2);
+static void copyTruncatedToWidth(char* dst, size_t dstSize, const char* src, uint8_t font, int16_t maxW) {
+    copyStrSafe(dst, dstSize, src);
+    size_t len = strlen(dst);
+    while (len > 0 && tft.textWidth(dst, font) > maxW) {
+        dst[--len] = '\0';
     }
+}
 
-    // Big Clock Box (static, zero animations in offline mode)
-    tft.fillRect(10, 52, 222, 92, INK);
-    tft.fillRect(12, 54, 218, 88, WHITE);
-    tft.fillRect(12, 54, 218, 4, wifiOnline ? BLUE : RED);
+static void formatErrFriendly(char* dst, size_t dstSize, const char* err) {
+    copyStrSafe(dst, dstSize, err);
+    for (size_t i = 0; dst[i] != '\0'; i++) {
+        if (dst[i] == '_') dst[i] = ' ';
+    }
+}
+
+static void formatDateLine(const struct tm* t, bool hasTime, char* out, size_t outSize) {
+    if (hasTime && t != nullptr) {
+        snprintf(out, outSize, "%s %02d %s",
+                 DAYS_ES[t->tm_wday % 7], t->tm_mday, MONTHS_ES[t->tm_mon % 12]);
+    } else {
+        copyStrSafe(out, outSize, "MODO OFFLINE");
+    }
+}
+
+static void drawStandbyClockInterior(const struct tm* t, bool hasTime, const GbcPalette565& pal) {
+    tft.fillRect(12, 92, 216, 64, pal.card);
+    tft.setTextSize(1);
 
     if (hasTime && t != nullptr) {
         char timeBuf[16];
@@ -628,71 +1005,187 @@ static void drawStandbyClock(const struct tm* t, bool hasTime, bool wifiOnline) 
             if (h12 == 0) h12 = 12;
             snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", h12, t->tm_min);
             tft.setTextDatum(MC_DATUM);
-            tft.setTextColor(INK, WHITE);
-            tft.drawString(timeBuf, 102, 100, 6);
+            tft.setTextColor(pal.ink, pal.card);
+            tft.drawString(timeBuf, 102, 126, 6);
 
-            tft.fillRect(184, 108, 36, 20, BLUE);
-            tft.setTextColor(WHITE, BLUE);
-            tft.drawString(t->tm_hour >= 12 ? "PM" : "AM", 202, 118, 2);
+            tft.fillRect(180, 126, 38, 20, pal.border);
+            tft.fillRect(182, 128, 34, 16, pal.blue);
+            tft.setTextColor(pal.card, pal.blue);
+            tft.drawString(t->tm_hour >= 12 ? "PM" : "AM", 199, 136, 2);
         } else {
             snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", t->tm_hour, t->tm_min);
             tft.setTextDatum(MC_DATUM);
-            tft.setTextColor(INK, WHITE);
-            tft.drawString(timeBuf, 120, 100, 6);
+            tft.setTextColor(pal.ink, pal.card);
+            tft.drawString(timeBuf, 120, 126, 6);
         }
     } else {
         tft.setTextDatum(MC_DATUM);
-        tft.setTextColor(MUTED, WHITE);
-        tft.drawString("--:--", 120, 100, 6);
+        tft.setTextColor(pal.muted, pal.card);
+        tft.drawString("--:--", 120, 126, 6);
     }
+}
 
-    // Classic GBC Double-Border Dialogue Box (Date + Live/Cached Offline Weather)
-    tft.fillRect(8, 158, 224, 72, INK);
-    tft.fillRect(12, 162, 216, 64, CREAM);
-    tft.fillRect(14, 164, 212, 60, INK);
-    tft.fillRect(16, 166, 208, 56, CREAM);
+static void drawStandbyClock(const struct tm* t, bool hasTime, bool wifiOnline, bool partialTimeOnly = false) {
+    const uint8_t pokeIdx = offlineState.pokemonIdx % POKE_SPRITE_COUNT;
+    const uint8_t palIdx = offlineState.paletteIdx % GBC_PALETTE_COUNT;
+    const GbcPalette565& pal = GBC_PALETTES[palIdx];
+    const PokeSprite565& poke = POKE_SPRITES[pokeIdx];
 
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(INK, CREAM);
-    if (hasTime && t != nullptr) {
-        char dateBuf[32];
-        snprintf(dateBuf, sizeof(dateBuf), "%s %02d %s",
-                 DAYS_ES[t->tm_wday % 7], t->tm_mday, MONTHS_ES[t->tm_mon % 12]);
-        tft.drawString(dateBuf, 24, 182, 2);
-    } else if (offlineWeatherValid && offlineCityResp.length() > 0) {
-        String cityLbl = offlineCityResp;
-        if (cityLbl.length() > 11) cityLbl = cityLbl.substring(0, 11);
-        tft.drawString(cityLbl, 24, 182, 2);
-    } else {
-        tft.drawString("MODO OFFLINE", 24, 182, 2);
-    }
+    tft.startWrite();
+    tft.setTextSize(1);
 
-    if (offlineWeatherValid) {
-        float dispTemp = offlineState.celsius ? offlineTempC : (offlineTempC * 9.0f / 5.0f + 32.0f);
-        char tempBuf[24];
-        snprintf(tempBuf, sizeof(tempBuf), "%d%s %d%%",
-                 (int)roundf(dispTemp), offlineState.celsius ? "C" : "F", offlineHumidity);
-        tft.setTextDatum(MR_DATUM);
-        tft.setTextColor(BLUE, CREAM);
-        tft.drawString(tempBuf, 216, 182, 2);
+    if (!partialTimeOnly) {
+        // Full authentic GBC Pokémon stage render
+        tft.fillScreen(pal.bg);
+        tft.fillRect(0, 0, 240, 6, poke.accent);
 
-        String baseDesc = offlineDesc.length() > 0 ? offlineDesc : offlineCityResp;
-        String line2 = baseDesc;
-        if (offlineWeatherFromCache && offlineWeatherUpdatedHm.length() == 5) {
-            line2 = offlineWeatherUpdatedHm + " " + baseDesc;
+        // Subtle 2x2 checkerboard horizon dither at y=76
+        for (int16_t dx = 0; dx < 240; dx += 4) {
+            tft.fillRect(dx, 76, 2, 2, pal.dither);
+            tft.fillRect(dx + 2, 78, 2, 2, pal.dither);
         }
-        if (line2.length() > 18) line2 = line2.substring(0, 18);
+
+        // Top-right zone (x=156..232, y=10..78): Oval GBC battle pad + 54x54 Pokémon sprite
+        const int16_t padCx = 194;
+        const int16_t padY = 62;
+        tft.fillRect(padCx - 26, padY,      52, 2, pal.pad_top);
+        tft.fillRect(padCx - 34, padY + 2,  68, 2, pal.pad_mid);
+        tft.fillRect(padCx - 38, padY + 4,  76, 6, pal.pad_mid);
+        tft.fillRect(padCx - 20, padY + 5,  40, 3, pal.pad_top);
+        tft.fillRect(padCx - 34, padY + 10, 68, 3, pal.pad_top);
+        tft.fillRect(padCx - 26, padY + 13, 52, 3, pal.pad_bot);
+        drawPokeSprite565(tft, pokeIdx, 166, 16, 3);
+
+        // Top-left zone (x=10..152, y=12..74): Trainer name + status badge
+        const char* badgeTxt = !wifiOnline ? "SIN WIFI" : (!hasTime ? "SIN NTP" : "PC OFF");
+        const uint16_t badgeCol = !wifiOnline ? pal.red : (!hasTime ? pal.muted : pal.blue);
+        const int16_t badgeW = (int16_t)tft.textWidth(badgeTxt, 1) + 8;
+        const int16_t badgeX = 152 - badgeW;
+        tft.drawRect(badgeX, 15, badgeW, 14, badgeCol);
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(badgeCol, pal.bg);
+        tft.drawString(badgeTxt, badgeX + badgeW / 2, 22, 1);
+
+        char trainerBuf[16];
+        copyTruncatedToWidth(trainerBuf, sizeof(trainerBuf), offlineState.trainerName, 2, badgeX - 14);
         tft.setTextDatum(ML_DATUM);
-        tft.setTextColor(MUTED, CREAM);
-        tft.drawString(line2, 24, 205, 2);
+        tft.setTextColor(pal.ink, pal.bg);
+        tft.drawString(trainerBuf, 10, 22, 2);
+
+        // Top-left line 2 (y=42): 14x14 mini weather icon + temp + humidity (or diagnostic)
+        const uint8_t iconIdx = offlineWeatherValid
+                                    ? (offlineWeatherIcon % WEATHER_ICON_COUNT)
+                                    : (wifiOnline ? WEATHER_ICON_CLOUD : WEATHER_ICON_MOON);
+        drawWeatherIcon565(tft, iconIdx, 12, 36, 2);
+
+        if (offlineWeatherValid) {
+            float dispTemp = offlineState.celsius ? offlineTempC : (offlineTempC * 9.0f / 5.0f + 32.0f);
+            char tempStr[12];
+            char humStr[8];
+            snprintf(tempStr, sizeof(tempStr), "%d%s", (int)roundf(dispTemp), offlineState.celsius ? "C" : "F");
+            snprintf(humStr, sizeof(humStr), "%d%%", offlineHumidity);
+
+            tft.setTextDatum(ML_DATUM);
+            tft.setTextColor(pal.blue, pal.bg);
+            tft.drawString(tempStr, 30, 43, 2);
+
+            int16_t humX = 30 + (int16_t)tft.textWidth(tempStr, 2) + 6;
+            if (humX + (int16_t)tft.textWidth(humStr, 2) <= 152) {
+                tft.setTextColor(pal.muted, pal.bg);
+                tft.drawString(humStr, humX, 43, 2);
+            }
+        } else {
+            char diagBuf[24];
+            if (!wifiOnline) {
+                copyStrSafe(diagBuf, sizeof(diagBuf), "SIN WIFI");
+            } else if (lastWeatherErr[0] != '\0') {
+                formatErrFriendly(diagBuf, sizeof(diagBuf), lastWeatherErr);
+            } else {
+                copyStrSafe(diagBuf, sizeof(diagBuf), "BUSCANDO...");
+            }
+            copyTruncatedToWidth(diagBuf, sizeof(diagBuf), diagBuf, 2, 122);
+            tft.setTextDatum(ML_DATUM);
+            tft.setTextColor(wifiOnline ? pal.muted : pal.red, pal.bg);
+            tft.drawString(diagBuf, 30, 43, 2);
+        }
+
+        // Gen-2 tapered L-bracket underline framing top-left HUD
+        tft.fillRect(10, 62, 132, 2, pal.border);
+        tft.fillRect(142, 60, 4, 4, pal.border);
+        tft.fillRect(12, 64, 128, 2, poke.accent);
+
+        // Central GBC Clock Box (x=10..230, y=86..158)
+        tft.fillRect(10, 86, 220, 72, pal.border);
+        tft.fillRect(12, 88, 216, 68, pal.card);
+        tft.fillRect(12, 88, 216, 4, wifiOnline ? pal.blue : pal.red);
+        drawStandbyClockInterior(t, hasTime, pal);
+
+        // Bottom Double-Border GBC Dialogue Box (x=8..232, y=166..232)
+        tft.fillRect(8, 166, 224, 66, pal.border);
+        tft.fillRect(11, 169, 218, 60, pal.bg);
+        tft.fillRect(13, 171, 214, 56, pal.border);
+        tft.fillRect(15, 173, 210, 52, pal.card);
+
+        // Dialogue Line 1 (y=184): Date on left, City (max 11 chars) on right
+        char dateBuf[24];
+        formatDateLine(t, hasTime, dateBuf, sizeof(dateBuf));
+        tft.setTextDatum(ML_DATUM);
+        tft.setTextColor(pal.ink, pal.card);
+        tft.drawString(dateBuf, 22, 184, 2);
+
+        char cityBuf[16];
+        const char* rawCity = (offlineCityResp[0] != '\0') ? offlineCityResp : offlineState.city;
+        sanitizeAsciiUpperTo(cityBuf, sizeof(cityBuf), rawCity, 11);
+        copyTruncatedToWidth(cityBuf, sizeof(cityBuf), cityBuf, 2, 92);
+        tft.setTextDatum(MR_DATUM);
+        tft.setTextColor(pal.blue, pal.card);
+        tft.drawString(cityBuf, 218, 184, 2);
+
+        // Dialogue Line 2 (y=206): Weather description or clear diagnostic
+        char line2[40];
+        if (offlineWeatherValid) {
+            const char* baseDesc = (offlineDesc[0] != '\0') ? offlineDesc : cityBuf;
+            if (offlineWeatherFromCache && strlen(offlineWeatherUpdatedHm) == 5) {
+                snprintf_P(line2, sizeof(line2), PSTR("%.5s %.27s"), offlineWeatherUpdatedHm, baseDesc);
+            } else {
+                copyStrSafe(line2, sizeof(line2), baseDesc);
+            }
+        } else if (!wifiOnline) {
+            copyStrSafe(line2, sizeof(line2), "SIN WIFI");
+        } else if (lastWeatherErr[0] != '\0') {
+            formatErrFriendly(line2, sizeof(line2), lastWeatherErr);
+        } else {
+            copyStrSafe(line2, sizeof(line2), "SINCRONIZANDO...");
+        }
+        copyTruncatedToWidth(line2, sizeof(line2), line2, 2, 182);
+        tft.setTextDatum(ML_DATUM);
+        tft.setTextColor((!offlineWeatherValid && !wifiOnline) ? pal.red : pal.muted, pal.card);
+        tft.drawString(line2, 22, 206, 2);
+
+        // Red GBC dialogue cursor triangle at (214, 212)
+        tft.fillTriangle(210, 209, 218, 209, 214, 215, pal.red);
     } else {
-        tft.setTextDatum(ML_DATUM);
-        tft.setTextColor(MUTED, CREAM);
-        tft.drawString(wifiOnline ? "SINCRONIZANDO..." : "BUSCANDO WIFI...", 24, 205, 2);
+        // Partial minute update: redraw ONLY clock interior (+ date if day changed)
+        drawStandbyClockInterior(t, hasTime, pal);
+
+        if (hasTime && t != nullptr &&
+            (t->tm_mday != lastStandbyMday || t->tm_mon != lastStandbyMon || t->tm_wday != lastStandbyWday)) {
+            char dateBuf[24];
+            formatDateLine(t, true, dateBuf, sizeof(dateBuf));
+            tft.fillRect(18, 175, 108, 18, pal.card);
+            tft.setTextDatum(ML_DATUM);
+            tft.setTextColor(pal.ink, pal.card);
+            tft.drawString(dateBuf, 22, 184, 2);
+        }
     }
 
-    // Red triangle cursor
-    tft.fillTriangle(210, 208, 218, 208, 214, 214, RED);
+    if (hasTime && t != nullptr) {
+        lastStandbyMday = t->tm_mday;
+        lastStandbyMon = t->tm_mon;
+        lastStandbyWday = t->tm_wday;
+    }
+
+    tft.endWrite();
 }
 
 // ============================================================
@@ -706,16 +1199,20 @@ static void onWifiConnected(bool showReadySplash) {
         apFallbackActive = false;
     }
     wifiWasConnected = true;
+    wifiDisconnectedSinceMs = 0;
+    weatherFailCount = 0;
     MDNS.begin(HOSTNAME);
     configTime(TZ_OFFSET_SEC, 0, "pool.ntp.org", "time.nist.gov");
     weatherSyncRequested = true;
     nextWeatherSyncMs = millis() + (showReadySplash ? 1500 : 500);
 
     if (showReadySplash) {
-        String ipStr = WiFi.localIP().toString();
-        drawSplash("READY v1.3!", ipStr.c_str(), "Waiting for PC");
+        char ipBuf[16];
+        ipToStr(WiFi.localIP(), ipBuf, sizeof(ipBuf));
+        drawSplash("READY v1.4!", ipBuf, "Waiting for PC");
     } else if (standbyActive || wasAp) {
         lastStandbyMin = -1;
+        standbyNeedsFullRedraw = true;
     }
 }
 
@@ -724,7 +1221,12 @@ static void onWifiConnected(bool showReadySplash) {
 // ============================================================
 static void handleRoot() {
     bool wifiOnline = (WiFi.status() == WL_CONNECTED);
-    String html = F(
+    char ipBuf[16];
+    ipToStr(wifiOnline ? WiFi.localIP() : WiFi.softAPIP(), ipBuf, sizeof(ipBuf));
+
+    String html;
+    html.reserve(1400);
+    html += F(
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>PokeDisplay</title>"
@@ -733,44 +1235,60 @@ static void handleRoot() {
         "a{display:inline-block;padding:10px 14px;background:#181820;color:#fff;text-decoration:none;margin:6px 6px 0 0;font-weight:bold;}"
         "a.hub{background:#24a848;display:block;text-align:center;margin-bottom:10px;}"
         "</style></head><body><div class='box'>"
-        "<h2>POKE-DISPLAY RAM v1.3</h2>"
+        "<h2>POKE-DISPLAY RAM v1.4</h2>"
         "<a class='hub' href='http://pokeclock.local/'>Abrir Panel Poké-Hub (PC)</a>"
     );
     html += F("<p>IP: ");
-    html += wifiOnline ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+    html += ipBuf;
     html += F("<br>Wi-Fi: ");
     html += wifiOnline ? F("Conectado") : F("Sin Wi-Fi (AP + reconexión)");
     html += F("<br>Modo: ");
-    html += standbyActive ? F("Offline (NTP + Clima autónomo)") : F("Controlado por PC");
+    html += standbyActive ? F("Offline Pokémon GBC") : F("Controlado por PC");
+    html += F("<br>Pokémon / Paleta: ");
+    html += POKE_SPRITES[offlineState.pokemonIdx % POKE_SPRITE_COUNT].name;
+    html += F(" / ");
+    html += GBC_PALETTE_NAMES[offlineState.paletteIdx % GBC_PALETTE_COUNT];
     html += F("<br>Clima offline: ");
     if (offlineWeatherValid) {
-        html += offlineCityResp + " " + String((int)roundf(offlineTempC)) + "C (" + offlineDesc + ")";
+        char tBuf[8];
+        snprintf(tBuf, sizeof(tBuf), "%d", (int)roundf(offlineTempC));
+        html += offlineCityResp;
+        html += ' ';
+        html += tBuf;
+        html += F("C (");
+        html += offlineDesc;
+        html += ')';
         if (offlineWeatherFromCache) {
             html += F(" [cache EEPROM");
-            if (offlineWeatherUpdatedHm.length() > 0) {
-                html += " " + offlineWeatherUpdatedHm;
+            if (offlineWeatherUpdatedHm[0] != '\0') {
+                html += ' ';
+                html += offlineWeatherUpdatedHm;
             }
-            html += F("]");
+            html += ']';
         }
     } else {
-        html += String(offlineState.city) + " (pendiente)";
+        html += offlineState.city;
+        html += F(" (");
+        html += (lastWeatherErr[0] != '\0') ? lastWeatherErr : "pendiente";
+        html += ')';
     }
-    html += F("<br>Frames: ");
-    html += String(frameCount);
-    html += F("<br>Last blit: ");
-    html += String(lastDecodeMs);
-    html += F(" ms<br>Free heap: ");
-    html += String(ESP.getFreeHeap());
-    html += F(" B</p><a href='/ota'>Firmware OTA</a><a href='/status'>JSON Status</a><a href='/offline_weather'>Test Clima</a></div></body></html>");
+    char statsBuf[64];
+    snprintf_P(statsBuf, sizeof(statsBuf), PSTR("<br>Frames: %lu<br>Last blit: %lu ms<br>Free heap: %u B"),
+               (unsigned long)frameCount, (unsigned long)lastDecodeMs, (unsigned)ESP.getFreeHeap());
+    html += statsBuf;
+    html += F("</p><a href='/ota'>Firmware OTA</a><a href='/status'>JSON Status</a><a href='/offline_weather'>Test Clima</a><a href='/standby'>Modo Offline</a></div></body></html>");
     server.send(200, "text/html", html);
 }
 
 static void handleStatus() {
     if (server.hasArg("keepalive")) {
-        lastFrameMs = millis();
-        pcContacted = true;
-        lastHubIp = server.client().remoteIP().toString();
+        if (!standbyActive && !forceStandbyNow) {
+            lastFrameMs = millis();
+            pcContacted = true;
+        }
+        ipToStr(server.client().remoteIP(), lastHubIp, sizeof(lastHubIp));
     }
+
     bool wifiOnline = (WiFi.status() == WL_CONNECTED);
     uint32_t weatherAgeS = 0;
     if (offlineWeatherValid) {
@@ -784,53 +1302,66 @@ static void handleStatus() {
         }
     }
 
-    String out;
-    out.reserve(600);
-    out += F("{\"device\":\"poke-display\",\"version\":\"");
-    out += FW_VERSION;
-    out += F("\",\"partial_frame\":true,\"ip\":\"");
-    out += wifiOnline ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-    out += F("\",\"hub_ip\":\"");
-    out += lastHubIp;
-    out += F("\",\"wifi_connected\":");
-    out += wifiOnline ? F("true") : F("false");
-    out += F(",\"ap_fallback\":");
-    out += apFallbackActive ? F("true") : F("false");
-    out += F(",\"rssi\":");
-    out += String(wifiOnline ? WiFi.RSSI() : 0);
-    out += F(",\"free_heap\":");
-    out += String(ESP.getFreeHeap());
-    out += F(",\"brightness\":");
-    out += String(currentBrightness);
-    out += F(",\"rotation\":");
-    out += String(currentRotation);
-    out += F(",\"frames\":");
-    out += String(frameCount);
-    out += F(",\"last_ms\":");
-    out += String(lastDecodeMs);
-    out += F(",\"standby\":");
-    out += standbyActive ? F("true") : F("false");
-    out += F(",\"offline_city\":\"");
-    out += jsonEscape(offlineCityResp.length() > 0 ? offlineCityResp : String(offlineState.city));
-    out += F("\",\"offline_weather_ok\":");
-    out += offlineWeatherValid ? F("true") : F("false");
-    out += F(",\"offline_weather_cached\":");
-    out += offlineWeatherFromCache ? F("true") : F("false");
-    out += F(",\"offline_weather_synced\":");
-    out += weatherSyncedThisBoot ? F("true") : F("false");
-    out += F(",\"offline_temp_c\":");
-    out += String(offlineTempC, 1);
-    out += F(",\"offline_humidity\":");
-    out += String(offlineHumidity);
-    out += F(",\"offline_desc\":\"");
-    out += jsonEscape(offlineDesc);
-    out += F("\",\"offline_weather_hm\":\"");
-    out += jsonEscape(offlineWeatherUpdatedHm);
-    out += F("\",\"offline_weather_age_s\":");
-    out += String(weatherAgeS);
-    out += F(",\"uptime_s\":");
-    out += String(millis() / 1000);
-    out += F("}");
+    char ipBuf[16];
+    char cityEsc[44];
+    char descEsc[60];
+    char hmEsc[16];
+    char errEsc[44];
+    char tempStr[12];
+
+    ipToStr(wifiOnline ? WiFi.localIP() : WiFi.softAPIP(), ipBuf, sizeof(ipBuf));
+    jsonEscapeTo(cityEsc, sizeof(cityEsc), offlineCityResp[0] != '\0' ? offlineCityResp : offlineState.city);
+    jsonEscapeTo(descEsc, sizeof(descEsc), offlineDesc);
+    jsonEscapeTo(hmEsc, sizeof(hmEsc), offlineWeatherUpdatedHm);
+    jsonEscapeTo(errEsc, sizeof(errEsc), lastWeatherErr);
+    dtostrf(isfinite(offlineTempC) ? offlineTempC : 0.0f, 1, 1, tempStr);
+
+    const char* pokeName = POKE_SPRITES[offlineState.pokemonIdx % POKE_SPRITE_COUNT].name;
+    const char* palName = GBC_PALETTE_NAMES[offlineState.paletteIdx % GBC_PALETTE_COUNT];
+    const char* iconName = WEATHER_ICONS[offlineWeatherIcon % WEATHER_ICON_COUNT].name;
+
+    char out[896];
+    snprintf_P(
+        out, sizeof(out),
+        PSTR("{\"device\":\"poke-display\",\"version\":\"%s\",\"partial_frame\":true,"
+             "\"ip\":\"%s\",\"hub_ip\":\"%s\",\"wifi_connected\":%s,\"ap_fallback\":%s,"
+             "\"rssi\":%d,\"free_heap\":%u,\"brightness\":%u,\"rotation\":%u,"
+             "\"frames\":%lu,\"last_ms\":%lu,\"standby\":%s,"
+             "\"offline_city\":\"%s\",\"offline_weather_ok\":%s,"
+             "\"offline_weather_cached\":%s,\"offline_weather_synced\":%s,"
+             "\"offline_temp_c\":%s,\"offline_humidity\":%d,"
+             "\"offline_desc\":\"%s\",\"offline_weather_hm\":\"%s\","
+             "\"offline_weather_age_s\":%lu,"
+             "\"weather_http\":%d,\"weather_err\":\"%s\","
+             "\"pokemon\":\"%s\",\"palette\":\"%s\",\"weather_icon\":\"%s\","
+             "\"uptime_s\":%lu}"),
+        FW_VERSION,
+        ipBuf,
+        lastHubIp,
+        wifiOnline ? "true" : "false",
+        apFallbackActive ? "true" : "false",
+        wifiOnline ? WiFi.RSSI() : 0,
+        (unsigned)ESP.getFreeHeap(),
+        (unsigned)currentBrightness,
+        (unsigned)currentRotation,
+        (unsigned long)frameCount,
+        (unsigned long)lastDecodeMs,
+        standbyActive ? "true" : "false",
+        cityEsc,
+        offlineWeatherValid ? "true" : "false",
+        offlineWeatherFromCache ? "true" : "false",
+        weatherSyncedThisBoot ? "true" : "false",
+        tempStr,
+        offlineHumidity,
+        descEsc,
+        hmEsc,
+        (unsigned long)weatherAgeS,
+        lastWeatherHttpCode,
+        errEsc,
+        pokeName,
+        palName,
+        iconName,
+        (unsigned long)(millis() / 1000));
     server.send(200, "application/json", out);
 }
 
@@ -840,22 +1371,39 @@ static void handleOfflineCfg() {
     nextState.rotation = currentRotation;
     bool weatherChanged = false;
     bool weatherProvided = false;
+    bool wiconProvided = false;
 
     if (server.hasArg("city") && server.arg("city").length() > 0) {
-        String c = server.arg("city");
-        c.trim();
-        if (c != String(nextState.city)) weatherChanged = true;
-        copyStrSafe(nextState.city, sizeof(nextState.city), c.c_str());
+        char cBuf[sizeof(nextState.city)];
+        copyStrSafe(cBuf, sizeof(cBuf), server.arg("city").c_str());
+        // Trim leading/trailing spaces in-place
+        char* start = cBuf;
+        while (*start == ' ') start++;
+        size_t len = strlen(start);
+        while (len > 0 && start[len - 1] == ' ') start[--len] = '\0';
+        if (start[0] != '\0') {
+            if (strcmp(start, nextState.city) != 0) weatherChanged = true;
+            copyStrSafe(nextState.city, sizeof(nextState.city), start);
+        }
     }
     if (server.hasArg("key") && server.arg("key").length() > 0) {
-        String k = server.arg("key");
-        k.trim();
-        if (k != String(nextState.weatherKey)) weatherChanged = true;
-        copyStrSafe(nextState.weatherKey, sizeof(nextState.weatherKey), k.c_str());
+        char kBuf[sizeof(nextState.weatherKey)];
+        copyStrSafe(kBuf, sizeof(kBuf), server.arg("key").c_str());
+        char* start = kBuf;
+        while (*start == ' ') start++;
+        size_t len = strlen(start);
+        while (len > 0 && start[len - 1] == ' ') start[--len] = '\0';
+        if (start[0] != '\0') {
+            if (strcmp(start, nextState.weatherKey) != 0) weatherChanged = true;
+            copyStrSafe(nextState.weatherKey, sizeof(nextState.weatherKey), start);
+        }
     }
     if (server.hasArg("name") && server.arg("name").length() > 0) {
-        String n = sanitizeAsciiUpper(server.arg("name"), 14);
-        if (n.length() > 0) copyStrSafe(nextState.trainerName, sizeof(nextState.trainerName), n.c_str());
+        char nBuf[sizeof(nextState.trainerName)];
+        sanitizeAsciiUpperTo(nBuf, sizeof(nBuf), server.arg("name").c_str(), 14);
+        if (nBuf[0] != '\0') {
+            copyStrSafe(nextState.trainerName, sizeof(nextState.trainerName), nBuf);
+        }
     }
     if (server.hasArg("c")) {
         nextState.celsius = (server.arg("c").toInt() != 0) ? 1 : 0;
@@ -863,8 +1411,19 @@ static void handleOfflineCfg() {
     if (server.hasArg("h12")) {
         nextState.hour12 = (server.arg("h12").toInt() != 0) ? 1 : 0;
     }
+    if (server.hasArg("poke") && server.arg("poke").length() > 0) {
+        nextState.pokemonIdx = parsePokeArg(server.arg("poke").c_str());
+    }
+    if (server.hasArg("pal") && server.arg("pal").length() > 0) {
+        nextState.paletteIdx = parsePaletteArg(server.arg("pal").c_str());
+    }
+    if (server.hasArg("wicon") && server.arg("wicon").length() > 0) {
+        wiconProvided = true;
+        offlineWeatherIcon = parseWeatherIconArg(server.arg("wicon").c_str());
+        nextState.weatherIcon = offlineWeatherIcon;
+    }
 
-    // Optional live weather snapshot pushed by PC (immediately persisted offline!)
+    // Optional live weather snapshot pushed by PC (RAM updated immediately, EEPROM protected by hysteresis)
     if (server.hasArg("temp") && server.arg("temp").length() > 0) {
         float tVal = server.arg("temp").toFloat();
         if (isfinite(tVal) && tVal >= -90.0f && tVal <= 90.0f) {
@@ -873,52 +1432,84 @@ static void handleOfflineCfg() {
             if (hVal < 0) hVal = 0;
             if (hVal > 100) hVal = 100;
 
-            String wCity = server.hasArg("wcity") && server.arg("wcity").length() > 0
-                               ? sanitizeAsciiUpper(server.arg("wcity"), 14)
-                               : sanitizeAsciiUpper(String(nextState.city), 14);
-            String wDesc = server.hasArg("desc") ? sanitizeAsciiUpper(server.arg("desc"), 22) : offlineDesc;
-            String wHm   = server.hasArg("hm") ? server.arg("hm") : offlineWeatherUpdatedHm;
-            wHm.trim();
-            if (wHm.length() > 5) wHm = wHm.substring(0, 5);
+            char wCity[sizeof(offlineCityResp)];
+            if (server.hasArg("wcity") && server.arg("wcity").length() > 0) {
+                sanitizeAsciiUpperTo(wCity, sizeof(wCity), server.arg("wcity").c_str(), 14);
+            } else {
+                sanitizeAsciiUpperTo(wCity, sizeof(wCity), nextState.city, 14);
+            }
+
+            char wDesc[sizeof(offlineDesc)];
+            if (server.hasArg("desc")) {
+                sanitizeAsciiUpperTo(wDesc, sizeof(wDesc), server.arg("desc").c_str(), 22);
+            } else {
+                copyStrSafe(wDesc, sizeof(wDesc), offlineDesc);
+            }
+
+            if (server.hasArg("hm")) {
+                char hmBuf[12];
+                copyStrSafe(hmBuf, sizeof(hmBuf), server.arg("hm").c_str());
+                char* hStart = hmBuf;
+                while (*hStart == ' ') hStart++;
+                size_t hLen = strlen(hStart);
+                while (hLen > 0 && hStart[hLen - 1] == ' ') hStart[--hLen] = '\0';
+                if (hLen > 5) hStart[5] = '\0';
+                if (hStart[0] != '\0') {
+                    copyStrSafe(offlineWeatherUpdatedHm, sizeof(offlineWeatherUpdatedHm), hStart);
+                }
+            }
 
             offlineTempC = tVal;
             offlineHumidity = hVal;
-            offlineCityResp = wCity;
-            offlineDesc = wDesc;
-            if (wHm.length() > 0) offlineWeatherUpdatedHm = wHm;
+            copyStrSafe(offlineCityResp, sizeof(offlineCityResp), wCity);
+            copyStrSafe(offlineDesc, sizeof(offlineDesc), wDesc);
+            if (!wiconProvided) {
+                offlineWeatherIcon = inferWeatherIconFromDesc(offlineDesc, isNightTimeNow(0, nullptr));
+            }
             offlineWeatherValid = true;
             offlineWeatherFromCache = false;
             weatherSyncedThisBoot = true;
             offlineWeatherUpdatedMs = millis();
+            weatherFailCount = 0;
+            lastWeatherErr[0] = '\0';
 
             time_t tnow = time(nullptr);
             if (tnow > 1700000000) {
                 offlineWeatherEpoch = (uint32_t)tnow;
             }
 
-            nextState.weatherValid = 1;
-            nextState.tempC = offlineTempC;
-            nextState.humidity = (int16_t)offlineHumidity;
-            copyStrSafe(nextState.cityResp, sizeof(nextState.cityResp), offlineCityResp.c_str());
-            copyStrSafe(nextState.desc, sizeof(nextState.desc), offlineDesc.c_str());
-            copyStrSafe(nextState.updatedHm, sizeof(nextState.updatedHm), offlineWeatherUpdatedHm.c_str());
-            nextState.updatedEpoch = offlineWeatherEpoch;
+            applyWeatherSnapshotToState(nextState, false);
         }
     }
 
     bool saved = commitOfflineStateIfChanged(nextState);
     if (weatherChanged && !weatherProvided) {
-        // Keep previous cached weather until new city fetches, but force immediate sync
+        weatherFailCount = 0;
         weatherSyncedThisBoot = false;
         weatherSyncRequested = true;
         nextWeatherSyncMs = millis();
     }
     if (standbyActive) {
         lastStandbyMin = -1;
+        standbyNeedsFullRedraw = true;
     }
-    String resp = "{\"ok\":true,\"saved\":" + String(saved ? "true" : "false") +
-                  ",\"weather_synced\":" + String(weatherProvided ? "true" : "false") +
-                  ",\"city\":\"" + jsonEscape(String(offlineState.city)) + "\"}";
+
+    char cityEsc[84];
+    jsonEscapeTo(cityEsc, sizeof(cityEsc), offlineState.city);
+    const char* pokeName = POKE_SPRITES[offlineState.pokemonIdx % POKE_SPRITE_COUNT].name;
+    const char* palName = GBC_PALETTE_NAMES[offlineState.paletteIdx % GBC_PALETTE_COUNT];
+
+    char resp[320];
+    snprintf_P(
+        resp, sizeof(resp),
+        PSTR("{\"ok\":true,\"saved\":%s,\"weather_synced\":%s,\"city\":\"%s\","
+             "\"pokemon\":\"%s\",\"palette\":\"%s\",\"weather_icon\":\"%s\"}"),
+        saved ? "true" : "false",
+        weatherProvided ? "true" : "false",
+        cityEsc,
+        pokeName,
+        palName,
+        WEATHER_ICONS[offlineWeatherIcon % WEATHER_ICON_COUNT].name);
     server.send(200, "application/json", resp);
 }
 
@@ -926,15 +1517,52 @@ static void handleOfflineWeatherNow() {
     bool ok = fetchOfflineWeather();
     if (ok && standbyActive) {
         lastStandbyMin = -1;
+        standbyNeedsFullRedraw = true;
     }
-    String resp = "{\"ok\":" + String(ok ? "true" : "false") +
-                  ",\"city\":\"" + jsonEscape(offlineCityResp.length() > 0 ? offlineCityResp : String(offlineState.city)) +
-                  "\",\"temp_c\":" + String(offlineTempC, 1) +
-                  ",\"humidity\":" + String(offlineHumidity) +
-                  ",\"desc\":\"" + jsonEscape(offlineDesc) +
-                  "\",\"updated_hm\":\"" + jsonEscape(offlineWeatherUpdatedHm) +
-                  "\",\"cached\":" + String(offlineWeatherFromCache ? "true" : "false") + "}";
+
+    char cityEsc[44];
+    char descEsc[60];
+    char hmEsc[16];
+    char errEsc[44];
+    char tempStr[12];
+    jsonEscapeTo(cityEsc, sizeof(cityEsc), offlineCityResp[0] != '\0' ? offlineCityResp : offlineState.city);
+    jsonEscapeTo(descEsc, sizeof(descEsc), offlineDesc);
+    jsonEscapeTo(hmEsc, sizeof(hmEsc), offlineWeatherUpdatedHm);
+    jsonEscapeTo(errEsc, sizeof(errEsc), lastWeatherErr);
+    dtostrf(isfinite(offlineTempC) ? offlineTempC : 0.0f, 1, 1, tempStr);
+
+    const char* pokeName = POKE_SPRITES[offlineState.pokemonIdx % POKE_SPRITE_COUNT].name;
+    const char* palName = GBC_PALETTE_NAMES[offlineState.paletteIdx % GBC_PALETTE_COUNT];
+    const char* iconName = WEATHER_ICONS[offlineWeatherIcon % WEATHER_ICON_COUNT].name;
+
+    char resp[384];
+    snprintf_P(
+        resp, sizeof(resp),
+        PSTR("{\"ok\":%s,\"city\":\"%s\",\"temp_c\":%s,\"humidity\":%d,"
+             "\"desc\":\"%s\",\"updated_hm\":\"%s\",\"cached\":%s,"
+             "\"weather_http\":%d,\"weather_err\":\"%s\","
+             "\"pokemon\":\"%s\",\"palette\":\"%s\",\"weather_icon\":\"%s\"}"),
+        ok ? "true" : "false",
+        cityEsc,
+        tempStr,
+        offlineHumidity,
+        descEsc,
+        hmEsc,
+        offlineWeatherFromCache ? "true" : "false",
+        lastWeatherHttpCode,
+        errEsc,
+        pokeName,
+        palName,
+        iconName);
     server.send(ok ? 200 : 502, "application/json", resp);
+}
+
+static void handleStandby() {
+    standbyActive = false;
+    lastStandbyMin = -1;
+    standbyNeedsFullRedraw = true;
+    forceStandbyNow = true;
+    server.send(200, "application/json", "{\"ok\":true,\"standby\":true}");
 }
 
 static void handleFrameUpload() {
@@ -981,24 +1609,32 @@ static void handleFrameDone() {
     if (drawX < 0 || drawX >= 240) drawX = 0;
     if (drawY < 0 || drawY >= 240) drawY = 0;
 
+    mcuYieldCounter = 0;
     uint32_t t0 = millis();
+    tft.startWrite();
     JRESULT res = TJpgDec.drawJpg(drawX, drawY, src, len);
+    tft.endWrite();
     lastDecodeMs = millis() - t0;
 
     if (res != JDR_OK) {
-        String err = "{\"ok\":false,\"jdr\":" + String((int)res) + "}";
-        server.send(422, "application/json", err);
+        char errBuf[48];
+        snprintf_P(errBuf, sizeof(errBuf), PSTR("{\"ok\":false,\"jdr\":%d}"), (int)res);
+        server.send(422, "application/json", errBuf);
         return;
     }
 
     frameCount++;
     lastFrameMs = millis();
     pcContacted = true;
+    forceStandbyNow = false;
     standbyActive = false;
+    standbyNeedsFullRedraw = true;
     lastStandbyMin = -1;
-    lastHubIp = server.client().remoteIP().toString();
+    ipToStr(server.client().remoteIP(), lastHubIp, sizeof(lastHubIp));
 
-    String resp = "{\"ok\":true,\"bytes\":" + String(len) + ",\"ms\":" + String(lastDecodeMs) + "}";
+    char resp[64];
+    snprintf_P(resp, sizeof(resp), PSTR("{\"ok\":true,\"bytes\":%u,\"ms\":%lu}"),
+               (unsigned)len, (unsigned long)lastDecodeMs);
     server.send(200, "application/json", resp);
 }
 
@@ -1012,7 +1648,10 @@ static void handleBrightness() {
     if (v > 100) v = 100;
     applyBrightness((uint8_t)v);
     scheduleDisplayPrefsSave();
-    server.send(200, "application/json", "{\"ok\":true,\"brightness\":" + String(currentBrightness) + "}");
+
+    char resp[48];
+    snprintf_P(resp, sizeof(resp), PSTR("{\"ok\":true,\"brightness\":%u}"), (unsigned)currentBrightness);
+    server.send(200, "application/json", resp);
 }
 
 static void handleRotation() {
@@ -1024,7 +1663,11 @@ static void handleRotation() {
     tft.setRotation(currentRotation);
     scheduleDisplayPrefsSave();
     lastStandbyMin = -1;
-    server.send(200, "application/json", "{\"ok\":true,\"rotation\":" + String(currentRotation) + "}");
+    standbyNeedsFullRedraw = true;
+
+    char resp[48];
+    snprintf_P(resp, sizeof(resp), PSTR("{\"ok\":true,\"rotation\":%u}"), (unsigned)currentRotation);
+    server.send(200, "application/json", resp);
 }
 
 static void handleRestart() {
@@ -1102,7 +1745,7 @@ void setup() {
         float dispTemp = offlineState.celsius ? offlineTempC : (offlineTempC * 9.0f / 5.0f + 32.0f);
         char cachedLine[32];
         snprintf(cachedLine, sizeof(cachedLine), "%.10s %d%s",
-                 offlineCityResp.c_str(), (int)roundf(dispTemp), offlineState.celsius ? "C" : "F");
+                 offlineCityResp, (int)roundf(dispTemp), offlineState.celsius ? "C" : "F");
         drawSplash("Connecting WiFi", WIFI_SSID, cachedLine);
     } else {
         drawSplash("Connecting WiFi", WIFI_SSID, "Please wait...");
@@ -1130,9 +1773,11 @@ void setup() {
         wifiWasConnected = false;
         apFallbackActive = true;
         apStartedMs = bootMs;
+        wifiDisconnectedSinceMs = bootMs;
+        lastWifiBeginMs = bootMs;
         WiFi.mode(WIFI_AP_STA);
         WiFi.softAP("PokeDisplay-OTA");
-        WiFi.begin(WIFI_SSID, WIFI_PASS); // Keep STA auto-reconnecting in background
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
         drawSplash("AP RECOVERY", "PokeDisplay-OTA", "192.168.4.1/ota");
     }
 
@@ -1140,7 +1785,10 @@ void setup() {
     server.on("/status", HTTP_GET, handleStatus);
     server.on("/ping", HTTP_GET, handleStatus);
     server.on("/offline_cfg", HTTP_GET, handleOfflineCfg);
+    server.on("/offline_cfg", HTTP_POST, handleOfflineCfg);
     server.on("/offline_weather", HTTP_GET, handleOfflineWeatherNow);
+    server.on("/standby", HTTP_GET, handleStandby);
+    server.on("/standby", HTTP_POST, handleStandby);
     server.on("/frame", HTTP_POST, handleFrameDone, handleFrameUpload);
     server.on("/brightness", HTTP_GET, handleBrightness);
     server.on("/rotation", HTTP_GET, handleRotation);
@@ -1150,7 +1798,6 @@ void setup() {
     server.begin();
 }
 
-static uint32_t lastWifiCheck = 0;
 static uint32_t lastStandbyCheck = 0;
 
 void loop() {
@@ -1159,7 +1806,7 @@ void loop() {
 
     flushPendingDisplayPrefs(now);
 
-    // 1. Continuous Wi-Fi monitoring & auto-recovery (works even from AP fallback!)
+    // 1. Smart Wi-Fi monitoring: let auto-reconnect work first, only call WiFi.begin() after >= 45s offline
     bool wifiOnline = (WiFi.status() == WL_CONNECTED);
     if (wifiOnline) {
         if (!wifiWasConnected || apFallbackActive) {
@@ -1169,48 +1816,64 @@ void loop() {
     } else {
         if (wifiWasConnected) {
             wifiWasConnected = false;
+            wifiDisconnectedSinceMs = now;
+            lastWifiBeginMs = now;
             if (standbyActive) {
                 lastStandbyMin = -1;
+                standbyNeedsFullRedraw = true;
             }
         }
-        if (now - lastWifiCheck >= WIFI_RECONNECT_INTERVAL_MS) {
-            lastWifiCheck = now;
+        if (wifiDisconnectedSinceMs == 0) {
+            wifiDisconnectedSinceMs = now;
+            lastWifiBeginMs = now;
+        }
+        if ((now - wifiDisconnectedSinceMs) >= WIFI_RECONNECT_INTERVAL_MS &&
+            (now - lastWifiBeginMs) >= WIFI_RECONNECT_INTERVAL_MS) {
+            lastWifiBeginMs = now;
             WiFi.begin(WIFI_SSID, WIFI_PASS);
         }
     }
 
-    // 2. Autonomous OpenWeatherMap sync (runs on boot, on Wi-Fi recovery, and every 15 min)
-    if (wifiOnline) {
-        uint32_t retryInterval = (pcContacted && !standbyActive)
-                                     ? (OFFLINE_WEATHER_RETRY_MS * 2)
-                                     : OFFLINE_WEATHER_RETRY_MS;
-        bool bootOrRequested = weatherSyncRequested && (int32_t)(now - nextWeatherSyncMs) >= 0;
-        bool initialRetry = !weatherSyncedThisBoot &&
-                            (int32_t)(now - nextWeatherSyncMs) >= 0 &&
-                            (lastWeatherAttemptMs == 0 || (now - lastWeatherAttemptMs) >= retryInterval);
-        bool periodicRefresh = weatherSyncedThisBoot &&
-                               (now - offlineWeatherUpdatedMs) >= OFFLINE_WEATHER_INTERVAL_MS;
+    // 2. Autonomous OpenWeatherMap sync with staggered backoff (30s -> 60s -> 180s -> 900s).
+    //    Skipped while PC is actively streaming frames and we already have valid weather.
+    if (wifiOnline && !(pcContacted && !standbyActive && offlineWeatherValid)) {
+        const uint8_t backoffIdx = (weatherFailCount == 0)
+                                       ? 0
+                                       : ((weatherFailCount - 1 < 4) ? (uint8_t)(weatherFailCount - 1) : 3);
+        const uint32_t retryInterval = WEATHER_BACKOFF_MS[backoffIdx];
+        const bool retryReady = (lastWeatherAttemptMs == 0) || ((now - lastWeatherAttemptMs) >= retryInterval);
+
+        const bool bootOrRequested = weatherSyncRequested && ((int32_t)(now - nextWeatherSyncMs) >= 0);
+        const bool initialRetry = !weatherSyncedThisBoot &&
+                                  ((int32_t)(now - nextWeatherSyncMs) >= 0) &&
+                                  retryReady;
+        const bool periodicRefresh = weatherSyncedThisBoot &&
+                                     ((now - offlineWeatherUpdatedMs) >= OFFLINE_WEATHER_INTERVAL_MS) &&
+                                     retryReady;
 
         if (bootOrRequested || initialRetry || periodicRefresh) {
             weatherSyncRequested = false;
             bool ok = fetchOfflineWeather();
-            if (ok && standbyActive) {
+            if (standbyActive && (ok || !offlineWeatherValid)) {
                 lastStandbyMin = -1;
+                standbyNeedsFullRedraw = true;
             }
         }
     }
 
-    // 3. Autonomous standby / offline clock + cached/live weather display
-    bool shouldStandby = false;
-    if (pcContacted) {
-        shouldStandby = (now - lastFrameMs) > STANDBY_TIMEOUT_MS;
-    } else if (apFallbackActive) {
-        shouldStandby = (now - apStartedMs) > AP_SPLASH_HOLD_MS;
-    } else {
-        shouldStandby = (now - bootMs) > BOOT_STANDBY_TIMEOUT_MS;
+    // 3. Autonomous standby / offline Pokémon GBC clock + cached/live weather display
+    bool shouldStandby = standbyActive || forceStandbyNow;
+    if (!shouldStandby) {
+        if (pcContacted) {
+            shouldStandby = (now - lastFrameMs) > STANDBY_TIMEOUT_MS;
+        } else if (apFallbackActive) {
+            shouldStandby = (now - apStartedMs) > AP_SPLASH_HOLD_MS;
+        } else {
+            shouldStandby = (now - bootMs) > BOOT_STANDBY_TIMEOUT_MS;
+        }
     }
 
-    if (shouldStandby && (now - lastStandbyCheck > 2000 || !standbyActive || lastStandbyMin == -1)) {
+    if (shouldStandby && ((now - lastStandbyCheck) > 2000 || !standbyActive || lastStandbyMin == -1)) {
         lastStandbyCheck = now;
         time_t tnow = time(nullptr);
         bool hasTime = (tnow > 1700000000);
@@ -1219,30 +1882,38 @@ void loop() {
             struct tm tinfo;
             localtime_r(&tnow, &tinfo);
             // Backfill updatedHm if weather synced right before NTP finished
-            if (offlineWeatherValid && weatherSyncedThisBoot && offlineWeatherUpdatedHm.length() == 0) {
-                char hm[8];
-                snprintf(hm, sizeof(hm), "%02d:%02d", tinfo.tm_hour, tinfo.tm_min);
-                offlineWeatherUpdatedHm = String(hm);
+            if (offlineWeatherValid && weatherSyncedThisBoot && offlineWeatherUpdatedHm[0] == '\0') {
+                snprintf(offlineWeatherUpdatedHm, sizeof(offlineWeatherUpdatedHm),
+                         "%02d:%02d", tinfo.tm_hour, tinfo.tm_min);
                 offlineWeatherEpoch = (uint32_t)tnow;
                 persistWeatherSnapshot();
             }
-            if (!standbyActive || tinfo.tm_min != lastStandbyMin ||
-                !lastStandbyHasTime || lastStandbyWifi != wifiOnline) {
+
+            const bool needFull = !standbyActive || standbyNeedsFullRedraw ||
+                                  lastStandbyMin < 0 || !lastStandbyHasTime ||
+                                  lastStandbyWifi != wifiOnline;
+            if (needFull) {
                 standbyActive = true;
+                standbyNeedsFullRedraw = false;
                 lastStandbyMin = tinfo.tm_min;
                 lastStandbyHasTime = true;
                 lastStandbyWifi = wifiOnline;
-                drawStandbyClock(&tinfo, true, wifiOnline);
+                drawStandbyClock(&tinfo, true, wifiOnline, false);
+            } else if (tinfo.tm_min != lastStandbyMin) {
+                lastStandbyMin = tinfo.tm_min;
+                drawStandbyClock(&tinfo, true, wifiOnline, true);
             }
         } else {
-            // No NTP yet (e.g. router or internet still offline): still show cached weather!
-            if (!standbyActive || lastStandbyMin == -1 ||
-                lastStandbyHasTime || lastStandbyWifi != wifiOnline) {
+            const bool needFull = !standbyActive || standbyNeedsFullRedraw ||
+                                  lastStandbyMin == -1 || lastStandbyHasTime ||
+                                  lastStandbyWifi != wifiOnline;
+            if (needFull) {
                 standbyActive = true;
+                standbyNeedsFullRedraw = false;
                 lastStandbyMin = -2;
                 lastStandbyHasTime = false;
                 lastStandbyWifi = wifiOnline;
-                drawStandbyClock(nullptr, false, wifiOnline);
+                drawStandbyClock(nullptr, false, wifiOnline, false);
             }
         }
     }

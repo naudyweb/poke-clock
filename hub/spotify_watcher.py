@@ -1,4 +1,4 @@
-"""Event-driven MPRIS Spotify watcher using native gdbus monitor + busctl."""
+"""Event-driven MPRIS Spotify watcher using native dbus-monitor + busctl."""
 
 from __future__ import annotations
 
@@ -86,8 +86,8 @@ def query_spotify_playing() -> dict | None:
 
 class SpotifyWatcher:
     """
-    Listens to session D-Bus MPRIS PropertiesChanged events via `gdbus monitor`
-    for instant (<50ms) reaction to Play/Pause/Next/Prev, plus a 5s safety sweep.
+    Listens to session D-Bus MPRIS PropertiesChanged events via `dbus-monitor`
+    for instant (<50ms) reaction to Play/Pause/Next/Prev, plus a 20s safety sweep.
     """
 
     def __init__(self, on_change: Callable[[dict | None], None]) -> None:
@@ -95,11 +95,13 @@ class SpotifyWatcher:
         self._stop = threading.Event()
         self._last_track: dict | None = None
         self._has_emitted = False
-        self._proc: subprocess.Popen | None = None
+        self._proc: subprocess.Popen[str] | None = None
+        self._proc_lock = threading.Lock()
         self._threads: list[threading.Thread] = []
         self._check_lock = threading.Lock()
 
     def start(self) -> None:
+        self._stop.clear()
         self._check_now()
         t_mon = threading.Thread(target=self._monitor_loop, name="spotify-dbus", daemon=True)
         t_poll = threading.Thread(target=self._fallback_loop, name="spotify-fallback", daemon=True)
@@ -109,11 +111,19 @@ class SpotifyWatcher:
 
     def stop(self) -> None:
         self._stop.set()
-        if self._proc and self._proc.poll() is None:
+        with self._proc_lock:
+            proc = self._proc
+            self._proc = None
+        if proc is not None and proc.poll() is None:
             try:
-                self._proc.terminate()
+                proc.terminate()
+                proc.wait(timeout=1.0)
             except Exception:
-                pass
+                try:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
+                except Exception:
+                    pass
 
     def _check_now(self) -> None:
         with self._check_lock:
@@ -128,8 +138,9 @@ class SpotifyWatcher:
 
     def _monitor_loop(self) -> None:
         while not self._stop.is_set():
+            proc: subprocess.Popen[str] | None = None
             try:
-                self._proc = subprocess.Popen(
+                proc = subprocess.Popen(
                     [
                         "dbus-monitor",
                         "--session",
@@ -140,9 +151,18 @@ class SpotifyWatcher:
                     text=True,
                     bufsize=1,
                 )
-                assert self._proc.stdout is not None
+                with self._proc_lock:
+                    if self._stop.is_set():
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        break
+                    self._proc = proc
+
+                assert proc.stdout is not None
                 last_trigger = 0.0
-                for line in self._proc.stdout:
+                for line in proc.stdout:
                     if self._stop.is_set():
                         break
                     if "org.mpris.MediaPlayer2.Player" in line or "PlaybackStatus" in line or "Metadata" in line:
@@ -151,8 +171,30 @@ class SpotifyWatcher:
                             last_trigger = now
                             self._check_now()
             except Exception:
-                time.sleep(2.0)
+                pass
+            finally:
+                with self._proc_lock:
+                    if self._proc is proc:
+                        self._proc = None
+                if proc is not None:
+                    if proc.stdout is not None:
+                        try:
+                            proc.stdout.close()
+                        except Exception:
+                            pass
+                    try:
+                        if proc.poll() is None:
+                            proc.terminate()
+                        proc.wait(timeout=1.0)
+                    except Exception:
+                        try:
+                            proc.kill()
+                            proc.wait(timeout=0.5)
+                        except Exception:
+                            pass
+                if not self._stop.is_set():
+                    self._stop.wait(2.0)
 
     def _fallback_loop(self) -> None:
-        while not self._stop.wait(5.0):
+        while not self._stop.wait(20.0):
             self._check_now()

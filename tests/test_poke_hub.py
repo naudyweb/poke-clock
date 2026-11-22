@@ -2,25 +2,50 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 import urllib.request
+from datetime import datetime
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from drivers.base import DisplayDriver
+from drivers.raw_frame_driver import RawFrameDriver
+from hub import state_engine
+from hub.desktop_notify_watcher import (
+    classify_desktop_notification,
+    clean_notification_text,
+    parse_dbus_monitor_block,
+)
 from hub.mdns_publisher import MdnsPublisher
 from hub.server import make_handler
-from hub.state_engine import PokeHubEngine, render_svg_to_full_and_strip, render_svg_to_jpg_bytes
-from screens import build_clock_svg, build_notify_svg, build_spotify_svg, build_weather_svg
+from hub.state_engine import (
+    DEFAULT_CONFIG,
+    PokeHubEngine,
+    collect_gemini_usage,
+    render_svg_to_full_and_strip,
+    render_svg_to_jpg_bytes,
+)
+from pixel_art import sanitize_pixel_text
+from screens import (
+    OFFLINE_POKEMON_ORDER,
+    build_clock_svg,
+    build_notify_svg,
+    build_spotify_svg,
+    build_weather_svg,
+    resolve_palette_bg,
+)
 
 
 class MockDriver(DisplayDriver):
@@ -209,6 +234,270 @@ class TestPokeHub(unittest.TestCase):
         self.assertIn("hum=78", path)
         self.assertIn("wcity=Paracas", path)
         self.assertIn("hm=01%3A15", path)
+
+    def test_render_engine_valid_jpeg_and_dark_palette(self) -> None:
+        now = datetime(2026, 11, 22, 22, 15)
+        for palette_name in ("gbc_classic", "gbc_dark"):
+            cfg = dict(self.engine.config, palette=palette_name, auto_night_palette=False)
+            svg = build_clock_svg(now, cfg, self.engine.weather_data, anim_frame=1)
+            full_jpg, strip_jpg = render_svg_to_full_and_strip(svg, bg_hex=resolve_palette_bg(cfg, now))
+            self.assertTrue(full_jpg.startswith(b"\xff\xd8"))
+            self.assertTrue(strip_jpg.startswith(b"\xff\xd8"))
+            self.assertLessEqual(len(full_jpg), 23500)
+            self.assertLessEqual(len(strip_jpg), 23500)
+            self.assertLess(len(strip_jpg), len(full_jpg))
+
+    def test_notify_svg_app_name_and_extended_glyphs(self) -> None:
+        raw_title = "user@mail.com"
+        raw_msg = "Build_1 #42 [OK] $5=5; <x>"
+        sanitized = sanitize_pixel_text(f"{raw_title} {raw_msg}")
+        for glyph in "@_#$[]=;<>":
+            self.assertIn(glyph, sanitized)
+        self.assertEqual(sanitized, "USER@MAIL.COM BUILD_1 #42 [OK] $5=5; <X>")
+
+        svg_mail = build_notify_svg(raw_title, raw_msg, app_name="MAIL")
+        svg_default = build_notify_svg(raw_title, raw_msg, app_name="")
+        self.assertTrue(svg_mail.startswith("<svg"))
+        self.assertIn("</svg>", svg_mail)
+        self.assertIn("<rect ", svg_mail)
+        self.assertNotEqual(svg_mail, svg_default)
+
+        jpg = render_svg_to_jpg_bytes(svg_mail)
+        self.assertTrue(jpg.startswith(b"\xff\xd8"))
+
+    def test_desktop_notify_watcher_helpers_and_parser(self) -> None:
+        cleaned = clean_notification_text("<b>Hola</b><br/>Mundo &amp; &quot;OK&quot; &lt;1&gt;\n\t!")
+        self.assertEqual(cleaned, 'Hola Mundo & "OK" <1> !')
+
+        cases = [
+            ("Thunderbird", "Nuevo correo", "De Ana", 1, "pikachu", "MAIL"),
+            ("Telegram Desktop", "Luis", "Hola!", 1, "jigglypuff", "TELEGRAM"),
+            ("Calendar", "Reunion", "15:00", 1, "snorlax", "CITA"),
+            ("UPower", "Battery low", "5%", 2, "charmander", "ALERTA"),
+            ("vscode", "Build", "Done", 1, "gengar", "VSCODE"),
+        ]
+        for app_name, summary, body, urgency, expected_poke, expected_badge in cases:
+            poke, badge = classify_desktop_notification(app_name, summary, body, urgency=urgency)
+            self.assertIn(poke, OFFLINE_POKEMON_ORDER)
+            self.assertEqual((poke, badge), (expected_poke, expected_badge))
+
+        dbus_lines = [
+            "method call time=1700000000.123456 sender=:1.42 -> destination=:1.15 serial=99 "
+            "path=/org/freedesktop/Notifications; interface=org.freedesktop.Notifications; member=Notify",
+            '   string "Thunderbird"',
+            "   uint32 7",
+            '   string "mail-unread"',
+            '   string "Nuevo correo"',
+            '   string "Linea uno',
+            'Linea dos"',
+            "   array [",
+            "   ]",
+            "   array [",
+            "      dict entry(",
+            '         string "urgency"',
+            "         variant             byte 2",
+            "      )",
+            "   ]",
+            "   int32 5000",
+        ]
+        parsed = parse_dbus_monitor_block(dbus_lines)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed["app_name"], "Thunderbird")
+        self.assertEqual(parsed["replaces_id"], 7)
+        self.assertEqual(parsed["app_icon"], "mail-unread")
+        self.assertEqual(parsed["summary"], "Nuevo correo")
+        self.assertEqual(parsed["body"], "Linea uno\nLinea dos")
+        self.assertEqual(parsed["urgency"], 2)
+
+    def test_notify_fifo_queue_filter_and_history(self) -> None:
+        self.assertFalse(DEFAULT_CONFIG["desktop_notify_dnd_night"])
+
+        res1 = self.engine.send_notify(
+            title="Mail 1",
+            message="Body 1",
+            pokemon="pikachu",
+            ttl=5,
+            app_name="MAIL",
+            source="desktop",
+        )
+        self.assertTrue(res1.get("ok"))
+        self.assertIsNotNone(self.engine.notify_state)
+        self.assertEqual(self.engine.notify_state["title"], "Mail 1")
+        self.assertEqual(len(self.engine._notify_queue), 0)
+
+        res2 = self.engine.send_notify(
+            title="Chat 2",
+            message="Body 2",
+            pokemon="jigglypuff",
+            ttl=5,
+            app_name="TELEGRAM",
+            source="desktop",
+        )
+        self.assertTrue(res2.get("ok"))
+        self.assertTrue(res2.get("queued"))
+        self.assertEqual(res2.get("queue_len"), 1)
+        self.assertEqual(self.engine.notify_state["title"], "Mail 1")
+        self.assertEqual(len(self.engine._notify_queue), 1)
+
+        with self.engine._lock:
+            expired_first = self.engine.notify_state["expires_at"] + 0.1
+            card, reason = self.engine.resolve_active_card_locked(expired_first)
+            self.assertEqual((card, reason), ("notify", "notify"))
+            self.assertIsNotNone(self.engine.notify_state)
+            self.assertEqual(self.engine.notify_state["title"], "Chat 2")
+            self.assertEqual(len(self.engine._notify_queue), 0)
+
+            expired_second = self.engine.notify_state["expires_at"] + 0.1
+            card2, reason2 = self.engine.resolve_active_card_locked(expired_second)
+            self.assertEqual((card2, reason2), ("clock", "rotation"))
+            self.assertIsNone(self.engine.notify_state)
+
+        status = self.engine.get_status()
+        history_titles = [item["title"] for item in status["notify_history"]]
+        self.assertEqual(history_titles, ["Chat 2", "Mail 1"])
+
+        # Ignore filter blocks Spotify
+        self.engine._on_desktop_notification({
+            "app_name": "Spotify",
+            "badge": "SPOTIFY",
+            "title": "Song",
+            "message": "Artist",
+            "pokemon": "jigglypuff",
+        })
+        self.assertIsNone(self.engine.notify_state)
+
+        # Allow filter only lets listed apps pass
+        self.engine.update_config({
+            "desktop_notify_filter_mode": "allow",
+            "desktop_notify_apps": ["thunderbird"],
+        })
+        self.engine._on_desktop_notification({
+            "app_name": "Discord",
+            "badge": "DISCORD",
+            "title": "Blocked",
+            "message": "Should be filtered",
+            "pokemon": "jigglypuff",
+        })
+        self.assertIsNone(self.engine.notify_state)
+
+        self.engine._on_desktop_notification({
+            "app_name": "Thunderbird",
+            "badge": "MAIL",
+            "title": "Allowed Mail",
+            "message": "Passed allow filter",
+            "pokemon": "pikachu",
+        })
+        self.assertIsNotNone(self.engine.notify_state)
+        self.assertEqual(self.engine.notify_state["title"], "Allowed Mail")
+
+    def test_collect_gemini_usage_incremental_cache(self) -> None:
+        log_dir = Path(self.tmp.name) / "conv-cache-test" / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        transcript = log_dir / "transcript.jsonl"
+        ts_now = datetime.now().astimezone().isoformat()
+        records = [
+            {"step_index": 1, "input_tokens": 120, "output_tokens": 30, "cache_read_tokens": 150, "created_at": ts_now},
+            {"step_index": 2, "input_tokens": 80, "output_tokens": 20, "cache_read_tokens": 50, "created_at": ts_now},
+        ]
+        transcript.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+
+        glob_pattern = str(Path(self.tmp.name) / "*" / ".system_generated" / "logs" / "transcript.jsonl")
+        with state_engine._GEMINI_CACHE_LOCK:
+            state_engine._GEMINI_FILE_CACHE.clear()
+
+        with mock.patch.object(state_engine, "TRANSCRIPT_GLOBS", [glob_pattern]), mock.patch(
+            "hub.state_engine._parse_gemini_file", wraps=state_engine._parse_gemini_file
+        ) as parse_spy:
+            first = collect_gemini_usage()
+            self.assertEqual(parse_spy.call_count, 1)
+            self.assertEqual(first["today_in"], 200)
+            self.assertEqual(first["today_out"], 50)
+            self.assertEqual(first["today_cache"], 200)
+            self.assertEqual(first["today_total"], 450)
+            self.assertEqual(first["today_steps"], 2)
+            self.assertEqual(first["today_sessions"], 1)
+            self.assertEqual(first["cache_pct"], 50)
+            self.assertEqual(first["week_total"], 450)
+
+            second = collect_gemini_usage()
+            self.assertEqual(parse_spy.call_count, 1)
+            self.assertEqual(second["today_in"], first["today_in"])
+            self.assertEqual(second["today_out"], first["today_out"])
+            self.assertEqual(second["today_cache"], first["today_cache"])
+            self.assertEqual(second["today_total"], first["today_total"])
+            self.assertEqual(second["today_steps"], first["today_steps"])
+            self.assertEqual(second["today_sessions"], first["today_sessions"])
+            self.assertEqual(second["week_total"], first["week_total"])
+
+    def test_raw_driver_offline_cfg_v14_and_standby(self) -> None:
+        drv = RawFrameDriver("127.0.0.1")
+        captured: list[tuple[str, str]] = []
+        drv._request = lambda method, path, **kwargs: (captured.append((method, path)), b'{"ok":true}')[1]  # type: ignore[method-assign]
+
+        ok = drv.sync_offline_config(
+            city="Paracas",
+            weatherkey="testkey",
+            celsius=True,
+            hour12=True,
+            trainer_name="POKEGEAR",
+            pokemon="gengar",
+            palette="gbc_dark",
+            weather_icon=2,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(len(captured), 1)
+        method, path = captured[0]
+        self.assertEqual(method, "GET")
+        self.assertTrue(path.startswith("/offline_cfg?"))
+        qs = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+        self.assertEqual(qs.get("poke"), ["gengar"])
+        self.assertEqual(qs.get("pal"), ["gbc_dark"])
+        self.assertEqual(qs.get("wicon"), ["2"])
+
+        captured.clear()
+        ok_standby = drv.enter_standby()
+        self.assertTrue(ok_standby)
+        self.assertEqual(captured, [("GET", "/standby")])
+
+    def test_rest_api_preview_etag_304_and_test_desktop(self) -> None:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.engine))
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/api/preview/active")
+            resp1 = conn.getresponse()
+            body1 = resp1.read()
+            etag = resp1.getheader("ETag")
+            self.assertEqual(resp1.status, 200)
+            self.assertTrue(etag)
+            self.assertTrue(body1.startswith(b"\xff\xd8"))
+            conn.close()
+
+            conn2 = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn2.request("GET", "/api/preview/active", headers={"If-None-Match": etag or ""})
+            resp2 = conn2.getresponse()
+            _ = resp2.read()
+            self.assertEqual(resp2.status, 304)
+            conn2.close()
+
+            conn3 = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn3.request(
+                "POST",
+                "/api/notify/test-desktop",
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            resp3 = conn3.getresponse()
+            payload3 = json.loads(resp3.read().decode("utf-8"))
+            self.assertEqual(resp3.status, 200)
+            self.assertTrue(payload3.get("ok"))
+            conn3.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 if __name__ == "__main__":

@@ -71,6 +71,16 @@ SPRITE_CATALOG: dict[str, tuple[list[str], dict[str, str], str]] = {
     "jigglypuff": (JIGGLYPUFF_SPRITE, JIGGLYPUFF_PALETTE, "#E078A0"),
 }
 
+OFFLINE_POKEMON_ORDER: tuple[str, ...] = (
+    "pikachu",
+    "charmander",
+    "squirtle",
+    "bulbasaur",
+    "gengar",
+    "snorlax",
+    "jigglypuff",
+)
+
 # Authentic GBC Crystal idle trajectories: (dx, dy, shadow_shrink)
 # Every pose keeps sprite inside y = 8..88 (cleanly above y=96 partial-blit seam)
 _POKEMON_MOTION: dict[str, list[tuple[int, int, int]]] = {
@@ -165,6 +175,13 @@ PALETTES: dict[str, dict[str, str]] = {
     },
 }
 
+OFFLINE_PALETTE_ORDER: tuple[str, ...] = (
+    "gbc_classic",
+    "gbc_dark",
+    "gb_green",
+    "pokedex_red",
+)
+
 
 def resolve_palette(cfg: dict | None, now: datetime | None = None) -> dict[str, str]:
     cfg = cfg or {}
@@ -177,6 +194,10 @@ def resolve_palette(cfg: dict | None, now: datetime | None = None) -> dict[str, 
         if in_night:
             name = "gbc_dark"
     return PALETTES.get(name, PALETTES["gbc_classic"])
+
+
+def resolve_palette_bg(cfg: dict | None = None, now: datetime | None = None) -> str:
+    return resolve_palette(cfg, now)["bg"]
 
 
 def _get_sprite(name: str, fallback: str = "pikachu") -> tuple[str, list[str], dict[str, str], str]:
@@ -326,8 +347,10 @@ def fmt_tokens(n: int) -> str:
 # ============================================================
 # 1. GEMINI TOKENS (Gen-2 Battle HUD)
 # ============================================================
-def build_gemini_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0) -> str:
-    pal = resolve_palette(cfg, datetime.now().astimezone())
+def build_gemini_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, now: datetime | None = None) -> str:
+    if now is None:
+        now = datetime.now().astimezone()
+    pal = resolve_palette(cfg, now)
     sprites = (cfg or {}).get("sprites") or {}
     sp_key, sp_grid, sp_pal, _ = _get_sprite(sprites.get("gemini", "pikachu"), "pikachu")
     dx, dy, sh = _pokemon_motion(sp_key, anim_frame)
@@ -434,7 +457,15 @@ def build_gemini_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0) 
 # ============================================================
 # 2. POKÉGEAR CLOCK (Authentic Gen-2 Pokégear + Day/Night)
 # ============================================================
-def build_clock_svg(now: datetime, device_cfg: dict, weather: dict | None, anim_frame: int = 0) -> str:
+def build_clock_svg(
+    now: datetime | None = None,
+    device_cfg: dict | None = None,
+    weather: dict | None = None,
+    anim_frame: int = 0,
+) -> str:
+    if now is None:
+        now = datetime.now().astimezone()
+    device_cfg = device_cfg or {}
     pal = resolve_palette(device_cfg, now)
     sprites = device_cfg.get("sprites") or {}
     is_night = now.hour >= 19 or now.hour < 6
@@ -577,8 +608,16 @@ def _weather_particles(main: str, anim_frame: int) -> str:
     )
 
 
-def build_weather_svg(weather: dict, device_cfg: dict, anim_frame: int = 0) -> str:
-    pal = resolve_palette(device_cfg, datetime.now().astimezone())
+def build_weather_svg(
+    weather: dict,
+    device_cfg: dict,
+    anim_frame: int = 0,
+    now: datetime | None = None,
+) -> str:
+    if now is None:
+        now = datetime.now().astimezone()
+    device_cfg = device_cfg or {}
+    pal = resolve_palette(device_cfg, now)
     sprites = device_cfg.get("sprites") or {}
     celsius = bool(device_cfg.get("celsius", True))
     unit = "C" if celsius else "F"
@@ -663,8 +702,15 @@ def build_weather_svg(weather: dict, device_cfg: dict, anim_frame: int = 0) -> s
 # ============================================================
 # 4. SPOTIFY NOW PLAYING (Gen-2 Concert Stage — Exclusive Auto)
 # ============================================================
-def build_spotify_svg(track: dict, cfg: dict | None = None, anim_frame: int = 0) -> str:
-    pal = resolve_palette(cfg, datetime.now().astimezone())
+def build_spotify_svg(
+    track: dict,
+    cfg: dict | None = None,
+    anim_frame: int = 0,
+    now: datetime | None = None,
+) -> str:
+    if now is None:
+        now = datetime.now().astimezone()
+    pal = resolve_palette(cfg, now)
     sprites = (cfg or {}).get("sprites") or {}
     sp_key, sp_grid, sp_pal, _ = _get_sprite(sprites.get("spotify", "jigglypuff"), "jigglypuff")
 
@@ -743,14 +789,27 @@ def build_spotify_svg(track: dict, cfg: dict | None = None, anim_frame: int = 0)
 # ============================================================
 # 5. POKÉMON NOTIFICATION CARD (Gen-1/2 Encounter Alert)
 # ============================================================
-def build_notify_svg(title: str, message: str, pokemon: str = "pikachu", cfg: dict | None = None, anim_frame: int = 0) -> str:
-    pal = resolve_palette(cfg, datetime.now().astimezone())
+def build_notify_svg(
+    title: str,
+    message: str,
+    pokemon: str = "pikachu",
+    cfg: dict | None = None,
+    anim_frame: int = 0,
+    app_name: str = "",
+    now: datetime | None = None,
+) -> str:
+    if now is None:
+        now = datetime.now().astimezone()
+    pal = resolve_palette(cfg, now)
     sp_key, sprite_grid, sprite_pal, accent = _get_sprite(pokemon, "pikachu")
     dx, dy, sh = _pokemon_motion(sp_key, anim_frame)
     sx, sy = 160 + dx, 14 + dy
+    banner_text = truncate_pixel_text(app_name, 106, 2) if app_name else ""
+    if not banner_text:
+        banner_text = "AVISO!"
     title_clean = truncate_pixel_text(title or "AVISO!", 124, 2)
     msg_lines = wrap_pixel_text(message or "", 196, 2, max_lines=3)
-    now_hm = datetime.now().astimezone().strftime("%H:%M")
+    now_hm = now.strftime("%H:%M")
 
     f4 = anim_frame % 4
     sparkle_svg = (
@@ -772,7 +831,7 @@ def build_notify_svg(title: str, message: str, pokemon: str = "pikachu", cfg: di
   <rect x="8" y="10" width="18" height="18" fill="{accent}"/>
   {render_pixel_text("!", 17, 13, 2, "#FFFFFF", align="center")}
   <rect x="30" y="10" width="114" height="18" fill="{pal['border']}"/>
-  {render_pixel_text("AVISO!", 87, 13, 2, "#F8D030", align="center")}
+  {render_pixel_text(banner_text, 87, 13, 2, "#F8D030", align="center")}
 
   {render_sprite(sprite_grid, sprite_pal, sx, sy, 4)}
   {_render_species_fx(sp_key, sx, sy, anim_frame)}

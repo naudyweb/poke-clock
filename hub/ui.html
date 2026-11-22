@@ -1103,6 +1103,216 @@
     flex-wrap: wrap;
   }
 
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+
+  .section-head .sub-title {
+    margin: 0;
+  }
+
+  .dnd-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  .dnd-badge.running {
+    background: var(--emerald-soft);
+    color: #0F6A33;
+    border: 1px solid rgba(21, 138, 67, 0.24);
+  }
+
+  .dnd-badge.alert {
+    background: var(--crimson-soft);
+    color: #A6202A;
+    border: 1px solid rgba(209, 52, 62, 0.28);
+  }
+
+  .dnd-badge.paused {
+    background: var(--canvas-recessed);
+    color: var(--ink-secondary);
+    border: 1px solid var(--hairline);
+  }
+
+  .apps-filter-row {
+    gap: 8px;
+  }
+
+  .apps-filter-row input[type="text"] {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+  }
+
+  .mini-btn {
+    padding: 6px 11px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--hairline-strong);
+    background: var(--surface);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), transform 130ms var(--ease-out);
+  }
+
+  .mini-btn:active { transform: scale(0.96); }
+
+  .outline-btn {
+    width: 100%;
+    margin-top: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 9px 14px;
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), transform 140ms var(--ease-out);
+  }
+
+  .outline-btn:active { transform: scale(0.98); }
+  .outline-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .history-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .history-item:last-child { border-bottom: 0; }
+
+  .history-body {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .history-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .history-app {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--ink-secondary);
+    text-transform: uppercase;
+  }
+
+  .history-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .history-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-muted);
+    margin-left: auto;
+  }
+
+  .history-msg {
+    font-size: 12px;
+    color: var(--ink-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .history-empty {
+    padding: 14px;
+    text-align: center;
+    font-size: 12.5px;
+    color: var(--ink-muted);
+  }
+
+  .offline-panel {
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .offline-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px 14px;
+  }
+
+  @media (max-width: 520px) {
+    .offline-grid { grid-template-columns: 1fr; }
+  }
+
+  .offline-kv {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .offline-k {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .offline-err {
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    background: var(--crimson-soft);
+    border: 1px solid rgba(209, 52, 62, 0.25);
+    color: #A6202A;
+    font-size: 12px;
+    font-weight: 600;
+    word-break: break-word;
+  }
+
   /* ============================================================
      Sonner-style Interruptible Toast
      ============================================================ */
@@ -1165,6 +1375,7 @@
     .poke-chip:hover:not(.active) { background: var(--surface-hover); border-color: var(--hairline-strong); }
     .primary-btn:hover:not(:disabled) { background: var(--crimson-hover); }
     .secondary-btn:hover { opacity: 0.92; }
+    .mini-btn:hover, .outline-btn:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--hairline-strong); }
   }
 
   /* ============================================================
@@ -1178,6 +1389,8 @@
     .poke-chip,
     .primary-btn,
     .secondary-btn,
+    .mini-btn,
+    .outline-btn,
     .pill-link,
     .icon-btn,
     .switch-track::after,
@@ -1495,6 +1708,73 @@
 
         <!-- TAB 1: AVISOS POKÉMON -->
         <div id="panel-alerts" class="tab-panel" role="tabpanel" aria-labelledby="tab-1">
+          <div class="section-head">
+            <h3 class="sub-title">Avisos del PC (Escritorio)</h3>
+            <span id="desktopDndBadge" class="dnd-badge paused">PAUSADO</span>
+          </div>
+
+          <div class="list-group">
+            <div class="list-row">
+              <div class="row-label">
+                <strong>Recibir avisos del PC</strong>
+                <small>Muestra notificaciones del escritorio en la pantalla</small>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="en-desktop-notify" onchange="saveDesktopNotifyConfig()">
+                <span class="switch-track"></span>
+              </label>
+            </div>
+
+            <div class="list-row">
+              <div class="row-label">
+                <strong>Silenciar en horario nocturno</strong>
+                <small>El No Molestar del sistema siempre se respeta</small>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="en-desktop-dnd-night" onchange="saveDesktopNotifyConfig()">
+                <span class="switch-track"></span>
+              </label>
+            </div>
+
+            <div class="list-row">
+              <span>Duración en pantalla</span>
+              <div class="seg-mini" id="desktopTtlSeg" role="group" aria-label="Duración avisos del PC">
+                <button type="button" data-dttl="5" onclick="setDesktopTtl(5)">5s</button>
+                <button type="button" data-dttl="12" onclick="setDesktopTtl(12)">12s</button>
+                <button type="button" data-dttl="20" onclick="setDesktopTtl(20)">20s</button>
+                <button type="button" data-dttl="30" onclick="setDesktopTtl(30)">30s</button>
+              </div>
+            </div>
+
+            <div class="list-row">
+              <span>Pokémon por defecto</span>
+              <span class="poke-select-wrap">
+                <span class="poke-dot" id="dot-desktop-notify"></span>
+                <select id="desktopNotifyPoke" onchange="saveDesktopNotifyConfig()"></select>
+              </span>
+            </div>
+
+            <div class="list-row">
+              <span>Filtro de apps</span>
+              <div class="seg-mini" role="group" aria-label="Modo de filtro de apps">
+                <button type="button" id="desktopFilterIgnore" onclick="setDesktopFilterMode('ignore')">Ignorar apps</button>
+                <button type="button" id="desktopFilterAllow" onclick="setDesktopFilterMode('allow')">Solo permitidas</button>
+              </div>
+            </div>
+
+            <div class="list-row apps-filter-row">
+              <input type="text" id="desktopAppsInput" placeholder="spotify, poke-hub, osd, volume, brightness" aria-label="Lista de apps separadas por comas">
+              <button type="button" id="saveDesktopAppsBtn" class="mini-btn" onclick="saveDesktopApps()">Guardar</button>
+            </div>
+          </div>
+
+          <button type="button" id="testDesktopNotifyBtn" class="outline-btn" onclick="testDesktopNotify()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22 6 12 13 2 6"/></svg>
+            Probar aviso PC
+          </button>
+
+          <h3 class="sub-title spaced">Aviso manual instantáneo</h3>
+
           <div class="field">
             <label for="nTitle">Título del aviso</label>
             <input type="text" id="nTitle" placeholder="Ej. BUILD OK" maxlength="24">
@@ -1524,6 +1804,11 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             <span id="sendNotifyLabel">Enviar aviso al instante</span>
           </button>
+
+          <h3 class="sub-title spaced">Historial reciente</h3>
+          <div id="notifyHistoryList" class="list-group">
+            <div class="history-empty">Sin avisos recientes</div>
+          </div>
         </div>
 
         <!-- TAB 2: AJUSTES -->
@@ -1608,9 +1893,31 @@
 
           <button type="button" class="secondary-btn" onclick="saveCustom(true)">Guardar nombre, ciudad y horario</button>
 
-          <div class="offline-note" id="offlineNote">
-            <span>Clima autónomo (PC apagada): sincronizado cada 15 min directo por Wi-Fi</span>
-            <span class="mono-readout" id="offlineWeatherReadout">--</span>
+          <h3 class="sub-title spaced">Clima y modo offline (ESP8266)</h3>
+          <div class="offline-panel" id="offlineNote">
+            <div class="offline-grid">
+              <div class="offline-kv">
+                <span class="offline-k">Firmware</span>
+                <span class="mono-readout" id="offFwVal">--</span>
+              </div>
+              <div class="offline-kv">
+                <span class="offline-k">Pokémon offline</span>
+                <span class="mono-readout" id="offPokeVal">--</span>
+              </div>
+              <div class="offline-kv">
+                <span class="offline-k">Paleta offline</span>
+                <span class="mono-readout" id="offPalVal">--</span>
+              </div>
+              <div class="offline-kv">
+                <span class="offline-k">Clima offline</span>
+                <span class="mono-readout" id="offlineWeatherReadout">--</span>
+              </div>
+            </div>
+            <div id="offWeatherErr" class="offline-err" hidden></div>
+            <button type="button" id="syncWeatherBtn" class="outline-btn" style="margin-top:0;" onclick="forceRefreshData()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+              Sincronizar clima
+            </button>
           </div>
         </div>
       </section>
@@ -1655,10 +1962,33 @@ let state = {
   rotation: 0,
   notifyPoke: 'pikachu',
   notifyTtl: 12,
+  desktopNotifyTtl: 12,
+  desktopFilterMode: 'ignore',
   animations: true,
   activeCard: '',
   firstLoad: true,
 };
+
+let refreshInFlight = false;
+let previewInFlight = false;
+let lastFrameSeq = null;
+let lastPreviewEtag = '';
+let lastPreviewObjUrl = null;
+let lastHistoryKey = '';
+let pollTimer = null;
+let pollDelayMs = 3000;
+
+function parseIntSafe(val, fallback) {
+  const n = parseInt(val, 10);
+  return Number.isNaN(n) ? fallback : n;
+}
+
+function syncValueIfUnfocused(id, value) {
+  const el = $(id);
+  if (el && document.activeElement !== el) {
+    el.value = value;
+  }
+}
 
 function initControls() {
   // Sprite dropdowns
@@ -1678,6 +2008,18 @@ function initControls() {
       sel.appendChild(o);
     });
   });
+
+  // Desktop notify default Pokémon dropdown (7 real Pokémon)
+  const dSel = $('desktopNotifyPoke');
+  if (dSel) {
+    dSel.innerHTML = '';
+    SPRITES.forEach(([v, lbl]) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = lbl;
+      dSel.appendChild(o);
+    });
+  }
 
   // Notify Pokémon pill selector
   const host = $('notifyPokeChips');
@@ -1702,6 +2044,30 @@ function updateSpriteDots() {
     const val = $('sp-' + k).value;
     $('dot-' + k).style.background = SPRITE_COLOR[val] || '#6C7180';
   });
+}
+
+function updateDesktopPokeDot() {
+  const sel = $('desktopNotifyPoke');
+  const dot = $('dot-desktop-notify');
+  if (sel && dot) {
+    dot.style.background = SPRITE_COLOR[sel.value] || '#6C7180';
+  }
+}
+
+function updateDesktopTtlUI(sec) {
+  state.desktopNotifyTtl = sec;
+  const host = $('desktopTtlSeg');
+  if (!host) return;
+  host.querySelectorAll('button').forEach(b => {
+    b.classList.toggle('active', Number(b.dataset.dttl) === sec);
+  });
+}
+
+function updateDesktopFilterUI(mode) {
+  const m = mode === 'allow' ? 'allow' : 'ignore';
+  state.desktopFilterMode = m;
+  if ($('desktopFilterIgnore')) $('desktopFilterIgnore').classList.toggle('active', m === 'ignore');
+  if ($('desktopFilterAllow')) $('desktopFilterAllow').classList.toggle('active', m === 'allow');
 }
 
 function selectTtl(sec) {
@@ -1763,23 +2129,46 @@ document.addEventListener('visibilitychange', () => {
     clearTimeout(toastTimer);
   } else {
     if ($('toast').classList.contains('open') && !toastHovered) scheduleToastHide(toastRemaining);
+    pollDelayMs = 3000;
     refresh(true);
+    schedulePoll(pollDelayMs);
   }
 });
 
-// Smooth blur-mask preview swap only on intentional screen change
-function updatePreviewImg(blurSwap = false) {
+// Smooth blur-mask preview swap with ETag + in-flight guard
+async function updatePreviewImg(blurSwap = false) {
+  if (previewInFlight || document.hidden) return;
+  previewInFlight = true;
   const img = $('liveImg');
   if (blurSwap) img.classList.add('swapping');
-  const next = new Image();
-  next.onload = () => {
-    img.src = next.src;
+  try {
+    const res = await fetch('/api/preview/active', { cache: 'no-cache' });
+    if (!res.ok) return;
+    const etag = res.headers.get('ETag') || '';
+    if (etag && etag === lastPreviewEtag) return;
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    await new Promise(resolve => {
+      const next = new Image();
+      next.onload = () => {
+        img.src = objUrl;
+        if (lastPreviewObjUrl) URL.revokeObjectURL(lastPreviewObjUrl);
+        lastPreviewObjUrl = objUrl;
+        lastPreviewEtag = etag;
+        resolve();
+      };
+      next.onerror = () => {
+        URL.revokeObjectURL(objUrl);
+        resolve();
+      };
+      next.src = objUrl;
+    });
+  } catch (e) {
+    // Ignore transient preview errors
+  } finally {
+    previewInFlight = false;
     if (blurSwap) requestAnimationFrame(() => img.classList.remove('swapping'));
-  };
-  next.onerror = () => {
-    if (blurSwap) img.classList.remove('swapping');
-  };
-  next.src = '/api/preview/active?t=' + Date.now();
+  }
 }
 
 async function post(url, body = {}) {
@@ -1800,7 +2189,6 @@ async function showCard(card, fromKeyboard = false) {
   const r = await post('/api/show', { card });
   if (r.ok) {
     toast(`Mostrando ${CARD_NAMES[card] || card} (${r.pc_ms || 0} ms)`);
-    updatePreviewImg(true);
     refresh(false);
   } else {
     toast(r.error || 'No se pudo cambiar la pantalla', true);
@@ -1810,13 +2198,14 @@ async function showCard(card, fromKeyboard = false) {
 async function setAuto(fromKeyboard = false) {
   const r = await post('/api/auto');
   toast(`Modo automático (${CARD_NAMES[r.card] || r.card || 'activo'})`);
-  updatePreviewImg(true);
   refresh(false);
 }
 
 async function forceRefreshData() {
   const btn = $('refreshBtn');
+  const syncBtn = $('syncWeatherBtn');
   btn.classList.add('spinning');
+  if (syncBtn) syncBtn.disabled = true;
   try {
     await post('/api/refresh');
     toast('Datos actualizados');
@@ -1824,6 +2213,7 @@ async function forceRefreshData() {
   } catch (e) {
     toast('Error al actualizar', true);
   } finally {
+    if (syncBtn) syncBtn.disabled = false;
     setTimeout(() => btn.classList.remove('spinning'), 350);
   }
 }
@@ -1831,7 +2221,6 @@ async function forceRefreshData() {
 async function setPalette(pal) {
   await post('/api/config', { palette: pal });
   toast('Paleta aplicada');
-  updatePreviewImg(true);
   refresh(false);
 }
 
@@ -1847,7 +2236,6 @@ async function saveSprites() {
     },
   });
   toast('Compañero Pokémon actualizado');
-  updatePreviewImg(true);
   refresh(false);
 }
 
@@ -1874,19 +2262,204 @@ async function saveCustom(explicit = false) {
     },
     spotify_priority: $('en-spprio').checked,
     animations: $('en-anim').checked,
-    rotate_interval: parseInt($('rotInt').value, 10),
+    rotate_interval: parseIntSafe($('rotInt').value, 12),
     trainer_name: $('trainerName').value.trim() || 'POKEGEAR',
     city: $('cityName').value.trim() || 'Paracas',
     celsius: state.celsius,
     hour12: state.hour12,
     auto_night_palette: $('autoNightPal').checked,
     night_mode: $('nightMode').checked,
-    night_start: parseInt($('nightStart').value, 10) || 23,
-    night_end: parseInt($('nightEnd').value, 10) || 7,
-    night_brightness: parseInt($('nightBright').value, 10) || 18,
+    night_start: parseIntSafe($('nightStart').value, 23),
+    night_end: parseIntSafe($('nightEnd').value, 7),
+    night_brightness: parseIntSafe($('nightBright').value, 18),
   });
   toast(explicit ? 'Ajustes guardados y sincronizados' : 'Preferencia aplicada');
-  refresh(true);
+  refresh(false);
+}
+
+async function saveDesktopNotifyConfig(msg = 'Preferencia aplicada') {
+  updateDesktopPokeDot();
+  await post('/api/config', {
+    desktop_notify_enabled: $('en-desktop-notify').checked,
+    desktop_notify_dnd_night: $('en-desktop-dnd-night').checked,
+    desktop_notify_ttl: state.desktopNotifyTtl,
+    desktop_notify_pokemon: $('desktopNotifyPoke').value,
+    desktop_notify_filter_mode: state.desktopFilterMode,
+  });
+  toast(msg);
+  refresh(false);
+}
+
+function setDesktopTtl(sec) {
+  updateDesktopTtlUI(sec);
+  saveDesktopNotifyConfig('Duración de avisos PC actualizada');
+}
+
+function setDesktopFilterMode(mode) {
+  updateDesktopFilterUI(mode);
+  saveDesktopNotifyConfig('Filtro de apps actualizado');
+}
+
+async function saveDesktopApps() {
+  await post('/api/config', {
+    desktop_notify_filter_mode: state.desktopFilterMode,
+    desktop_notify_apps: $('desktopAppsInput').value,
+  });
+  toast('Lista de apps guardada');
+  refresh(false);
+}
+
+async function testDesktopNotify() {
+  const btn = $('testDesktopNotifyBtn');
+  btn.disabled = true;
+  try {
+    const r = await post('/api/notify/test-desktop');
+    if (r.ok) {
+      toast(`Aviso PC de prueba enviado (${r.pc_ms || 0} ms)`);
+      refresh(false);
+    } else {
+      toast(r.error || 'Error enviando aviso PC', true);
+    }
+  } catch (e) {
+    toast('Error de conexión con el hub', true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function resendNotify(item) {
+  try {
+    const r = await post('/api/notify', {
+      title: item.title || 'AVISO!',
+      message: item.message || '',
+      pokemon: item.pokemon || 'pikachu',
+      ttl: state.notifyTtl,
+      app_name: item.app_name || '',
+    });
+    if (r.ok) {
+      toast(`Aviso reenviado (${r.pc_ms || 0} ms)`);
+      refresh(false);
+    } else {
+      toast(r.error || 'Error reenviando aviso', true);
+    }
+  } catch (e) {
+    toast('Error de conexión con el hub', true);
+  }
+}
+
+function renderNotifyHistory(items) {
+  const host = $('notifyHistoryList');
+  if (!host) return;
+  const list = Array.isArray(items) ? items : [];
+  const sig = JSON.stringify(list);
+  if (sig === lastHistoryKey) return;
+  lastHistoryKey = sig;
+
+  host.innerHTML = '';
+  if (list.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.textContent = 'Sin avisos recientes';
+    host.appendChild(empty);
+    return;
+  }
+
+  list.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'history-item';
+
+    const body = document.createElement('div');
+    body.className = 'history-body';
+
+    const top = document.createElement('div');
+    top.className = 'history-top';
+
+    const badge = document.createElement('span');
+    badge.className = 'history-app';
+    const dot = document.createElement('span');
+    dot.className = 'poke-dot';
+    dot.style.background = SPRITE_COLOR[item.pokemon] || '#6C7180';
+    badge.appendChild(dot);
+    badge.appendChild(document.createTextNode(item.app_name || (item.source === 'desktop' ? 'PC' : 'MANUAL')));
+    top.appendChild(badge);
+
+    const title = document.createElement('span');
+    title.className = 'history-title';
+    title.textContent = item.title || 'AVISO!';
+    top.appendChild(title);
+
+    if (item.hm) {
+      const tm = document.createElement('span');
+      tm.className = 'history-time';
+      tm.textContent = item.hm;
+      top.appendChild(tm);
+    }
+
+    body.appendChild(top);
+
+    if (item.message) {
+      const msg = document.createElement('div');
+      msg.className = 'history-msg';
+      msg.textContent = item.message;
+      body.appendChild(msg);
+    }
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mini-btn';
+    btn.textContent = 'Reenviar';
+    btn.onclick = () => resendNotify(item);
+
+    row.appendChild(body);
+    row.appendChild(btn);
+    host.appendChild(row);
+  });
+}
+
+function updateDesktopDndBadge(dn) {
+  const badge = $('desktopDndBadge');
+  if (!badge) return;
+  if (dn && dn.dnd_active) {
+    badge.className = 'dnd-badge alert';
+    badge.textContent = 'NO MOLESTAR ACTIVO';
+  } else if (dn && dn.running) {
+    badge.className = 'dnd-badge running';
+    badge.textContent = 'ACTIVO (D-Bus)';
+  } else {
+    badge.className = 'dnd-badge paused';
+    badge.textContent = 'PAUSADO';
+  }
+}
+
+function updateOfflinePanel(dev) {
+  $('offFwVal').textContent = dev.version ? `v${dev.version}` : '--';
+  $('offPokeVal').textContent = dev.pokemon || '--';
+  $('offPalVal').textContent = dev.palette || '--';
+
+  if (dev.offline_city) {
+    if (dev.offline_weather_ok && dev.offline_temp_c != null) {
+      const parts = [`${dev.offline_city} ${Math.round(Number(dev.offline_temp_c))}°C`];
+      if (dev.offline_humidity != null) parts.push(`${dev.offline_humidity}%`);
+      if (dev.offline_desc) parts.push(dev.offline_desc);
+      const hm = dev.offline_weather_hm ? ` (${dev.offline_weather_hm})` : '';
+      $('offlineWeatherReadout').textContent = parts.join(' · ') + hm;
+    } else {
+      $('offlineWeatherReadout').textContent = `${dev.offline_city} (sin caché)`;
+    }
+  } else {
+    $('offlineWeatherReadout').textContent = '--';
+  }
+
+  const errEl = $('offWeatherErr');
+  const errMsg = (dev.weather_err || '').trim();
+  if (errMsg) {
+    const httpInfo = dev.weather_http ? ` (HTTP ${dev.weather_http})` : '';
+    errEl.textContent = `Error clima: ${errMsg}${httpInfo}`;
+    errEl.hidden = false;
+  } else {
+    errEl.textContent = '';
+    errEl.hidden = true;
+  }
 }
 
 async function setRot(val) {
@@ -1912,7 +2485,6 @@ async function sendNotify() {
     });
     if (r.ok) {
       toast(`Aviso enviado (${r.pc_ms || 0} ms)`);
-      updatePreviewImg(true);
       refresh(false);
     } else {
       toast(r.error || 'Error enviando aviso', true);
@@ -1935,7 +2507,7 @@ $('brightRange').addEventListener('input', e => {
   $('brightVal').textContent = val;
   paintRangeTrack(val);
   clearTimeout(brightTimer);
-  brightTimer = setTimeout(() => post('/api/brightness', { val }), 110);
+  brightTimer = setTimeout(() => post('/api/brightness', { value: val }), 110);
 });
 
 // Keyboard shortcuts (zero animation delay per Emil Kowalski framework)
@@ -1950,9 +2522,14 @@ document.addEventListener('keydown', e => {
 });
 
 async function refresh(withPreview = true) {
-  if (document.hidden) return;
+  if (document.hidden || refreshInFlight) return;
+  refreshInFlight = true;
   try {
-    const st = await (await fetch('/api/status')).json();
+    const res = await fetch('/api/status');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const st = await res.json();
+    pollDelayMs = 3000;
+
     const dev = st.device || {};
     const online = dev.online !== false;
 
@@ -1966,9 +2543,13 @@ async function refresh(withPreview = true) {
       $('domainText').textContent = st.hub.url.replace(/^https?:\/\//, '');
     }
 
-    const cardChanged = state.activeCard && state.activeCard !== st.active_card;
+    const cardChanged = Boolean(state.activeCard && state.activeCard !== st.active_card);
+    const seqChanged = st.frame_seq !== undefined && st.frame_seq !== lastFrameSeq;
     state.activeCard = st.active_card;
-    if (withPreview) updatePreviewImg(cardChanged);
+    if (st.frame_seq !== undefined) lastFrameSeq = st.frame_seq;
+    if (withPreview || seqChanged || cardChanged) {
+      updatePreviewImg(cardChanged);
+    }
 
     const cardName = CARD_NAMES[st.active_card] || st.active_card;
     $('telMode').textContent = cardName;
@@ -1994,12 +2575,9 @@ async function refresh(withPreview = true) {
       $('spotifyText').textContent = 'Spotify en pausa';
     }
 
-    if (dev.offline_city) {
-      const offDesc = dev.offline_weather_ok
-        ? `${dev.offline_city} ${Math.round(dev.offline_temp_c)}°C (${dev.offline_desc || 'OK'})`
-        : `${dev.offline_city} listo`;
-      $('offlineWeatherReadout').textContent = offDesc;
-    }
+    updateOfflinePanel(dev);
+    updateDesktopDndBadge(st.desktop_notify);
+    renderNotifyHistory(st.notify_history);
 
     ['clock', 'weather', 'gemini', 'spotify'].forEach(c => {
       $('btn-' + c).classList.toggle('active', st.active_card === c);
@@ -2029,24 +2607,34 @@ async function refresh(withPreview = true) {
       $('en-gemini').checked = !!c.enabled_cards.gemini;
       $('en-spprio').checked = !!c.spotify_priority;
       $('en-anim').checked = state.animations;
-      $('rotInt').value = String(c.rotate_interval || 12);
       $('autoNightPal').checked = !!c.auto_night_palette;
       $('nightMode').checked = !!c.night_mode;
 
-      if (state.firstLoad) {
-        $('trainerName').value = c.trainer_name || 'POKEGEAR';
-        $('cityName').value = c.city || 'Paracas';
-        $('nightStart').value = c.night_start ?? 23;
-        $('nightEnd').value = c.night_end ?? 7;
-        $('nightBright').value = c.night_brightness ?? 18;
-        if (c.sprites) {
-          Object.entries(c.sprites).forEach(([k, v]) => {
-            if ($('sp-' + k)) $('sp-' + k).value = v;
-          });
-          updateSpriteDots();
-        }
-        state.firstLoad = false;
+      $('en-desktop-notify').checked = c.desktop_notify_enabled !== false;
+      $('en-desktop-dnd-night').checked = !!c.desktop_notify_dnd_night;
+      updateDesktopTtlUI(Number(c.desktop_notify_ttl ?? 12));
+      updateDesktopFilterUI(c.desktop_notify_filter_mode || 'ignore');
+
+      syncValueIfUnfocused('rotInt', String(c.rotate_interval || 12));
+      syncValueIfUnfocused('trainerName', c.trainer_name || 'POKEGEAR');
+      syncValueIfUnfocused('cityName', c.city || 'Paracas');
+      syncValueIfUnfocused('nightStart', c.night_start ?? 23);
+      syncValueIfUnfocused('nightEnd', c.night_end ?? 7);
+      syncValueIfUnfocused('nightBright', c.night_brightness ?? 18);
+      syncValueIfUnfocused(
+        'desktopAppsInput',
+        Array.isArray(c.desktop_notify_apps) ? c.desktop_notify_apps.join(', ') : ''
+      );
+      syncValueIfUnfocused('desktopNotifyPoke', c.desktop_notify_pokemon || 'pikachu');
+      updateDesktopPokeDot();
+
+      if (c.sprites) {
+        Object.entries(c.sprites).forEach(([k, v]) => {
+          syncValueIfUnfocused('sp-' + k, v);
+        });
+        updateSpriteDots();
       }
+      state.firstLoad = false;
 
       if (document.activeElement !== $('brightRange')) {
         const b = c.brightness ?? 95;
@@ -2056,22 +2644,32 @@ async function refresh(withPreview = true) {
       }
     }
   } catch (e) {
+    pollDelayMs = 6000;
     $('statusBadge').className = 'status-pill offline';
     $('statusText').textContent = 'Hub desconectado';
     $('powerLed').className = 'power-led off';
+  } finally {
+    refreshInFlight = false;
   }
 }
 
-paintRangeTrack(95);
-refresh(true);
+function schedulePoll(delay = pollDelayMs) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    await refresh(false);
+    schedulePoll(pollDelayMs);
+  }, delay);
+}
 
-// Live preview cadence: ~700ms when animations are active, 3s when static (pauses when hidden)
+paintRangeTrack(95);
+refresh(true).then(() => schedulePoll(pollDelayMs));
+
+// Live animation preview cadence (~700ms only when animations are active, guarded against overlap)
 setInterval(() => {
-  if (!document.hidden && state.animations) {
+  if (!document.hidden && state.animations && !previewInFlight) {
     updatePreviewImg(false);
   }
 }, 700);
-setInterval(() => refresh(false), 3000);
 </script>
 </body>
 </html>

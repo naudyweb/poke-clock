@@ -6,14 +6,23 @@ and blits straight to the ST7789 SPI display (~120-180ms, zero flash wear).
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
 from drivers.base import DisplayDriver
+
+_RETRYABLE_HTTP_ERRORS = (
+    http.client.RemoteDisconnected,
+    http.client.CannotSendRequest,
+    http.client.BadStatusLine,
+    http.client.ResponseNotReady,
+    http.client.IncompleteRead,
+    BrokenPipeError,
+    ConnectionResetError,
+)
 
 
 class RawFrameDriver(DisplayDriver):
@@ -22,21 +31,63 @@ class RawFrameDriver(DisplayDriver):
     def __init__(self, host: str, timeout: float = 4.0) -> None:
         self.host = host
         self.timeout = timeout
-        self._lock = threading.Lock()
-        self._last_pushed_hash = ""
+        self._lock = threading.RLock()
+        self._conn: http.client.HTTPConnection | None = None
+        self._last_pushed_key: tuple[str, int, int, str] = ("", 0, 0, "")
         self.last_push_ms = 0
         self.last_error = ""
 
+    def _ensure_conn(self) -> http.client.HTTPConnection:
+        if self._conn is None:
+            if ":" in self.host:
+                self._conn = http.client.HTTPConnection(self.host, timeout=self.timeout)
+            else:
+                self._conn = http.client.HTTPConnection(self.host, 80, timeout=self.timeout)
+        return self._conn
+
+    def _close_conn(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_conn()
+
     def _request(self, method: str, path: str, body: bytes | None = None, content_type: str | None = None) -> bytes:
-        url = f"http://{self.host}{path}"
-        headers = {"Connection": "close"}
+        headers: dict[str, str] = {"Connection": "keep-alive"}
         if body is not None:
             headers["Content-Length"] = str(len(body))
         if content_type:
             headers["Content-Type"] = content_type
-        req = urllib.request.Request(url, data=body, method=method, headers=headers)
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return resp.read()
+
+        with self._lock:
+            last_exc: Exception | None = None
+            for attempt in range(2):
+                conn = self._ensure_conn()
+                try:
+                    conn.request(method, path, body=body, headers=headers)
+                    resp = conn.getresponse()
+                    data = resp.read()
+                    if resp.will_close:
+                        self._close_conn()
+                    if resp.status >= 400:
+                        raise RuntimeError(f"HTTP {resp.status} {resp.reason}")
+                    return data
+                except _RETRYABLE_HTTP_ERRORS as exc:
+                    last_exc = exc
+                    self._close_conn()
+                    if attempt == 0:
+                        continue
+                    raise
+                except Exception:
+                    self._close_conn()
+                    raise
+            assert last_exc is not None
+            raise last_exc
 
     def _post_frame_multipart(self, jpg_bytes: bytes, x: int = 0, y: int = 0) -> bytes:
         boundary = "----PokeRawFrame7MA4YWxk"
@@ -54,14 +105,15 @@ class RawFrameDriver(DisplayDriver):
         )
 
     def push_frame(self, card_id: str, jpg_bytes: bytes, content_hash: str, force: bool = False) -> dict:
+        key = ("full", 0, 0, content_hash)
         with self._lock:
-            if not force and content_hash == self._last_pushed_hash:
+            if not force and key == self._last_pushed_key:
                 return {"skipped": True, "ms": 0}
             t0 = time.monotonic()
             try:
                 raw = self._post_frame_multipart(jpg_bytes)
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
-                self._last_pushed_hash = content_hash
+                self._last_pushed_key = key
                 self.last_push_ms = elapsed_ms
                 self.last_error = ""
                 try:
@@ -72,19 +124,20 @@ class RawFrameDriver(DisplayDriver):
                 return info
             except Exception as exc:
                 self.last_error = str(exc)
-                self._last_pushed_hash = ""
+                self._last_pushed_key = ("", 0, 0, "")
                 raise
 
     def push_region(self, card_id: str, jpg_bytes: bytes, content_hash: str, x: int = 0, y: int = 0) -> dict:
         """Stream a partial strip/region JPEG straight into ESP8266 RAM (~40-50ms)."""
+        key = ("region", int(x), int(y), content_hash)
         with self._lock:
-            if content_hash == self._last_pushed_hash:
+            if key == self._last_pushed_key:
                 return {"skipped": True, "ms": 0}
             t0 = time.monotonic()
             try:
                 raw = self._post_frame_multipart(jpg_bytes, x=x, y=y)
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
-                self._last_pushed_hash = content_hash
+                self._last_pushed_key = key
                 self.last_push_ms = elapsed_ms
                 self.last_error = ""
                 try:
@@ -95,7 +148,7 @@ class RawFrameDriver(DisplayDriver):
                 return info
             except Exception as exc:
                 self.last_error = str(exc)
-                self._last_pushed_hash = ""
+                self._last_pushed_key = ("", 0, 0, "")
                 raise
 
     def sync_offline_config(
@@ -106,8 +159,11 @@ class RawFrameDriver(DisplayDriver):
         hour12: bool,
         trainer_name: str,
         weather: dict | None = None,
+        pokemon: str | None = None,
+        palette: str | None = None,
+        weather_icon: int | None = None,
     ) -> bool:
-        """Sync city/key/units (+ optional weather snapshot) to ESP8266 for offline persistence."""
+        """Sync city/key/units (+ optional weather snapshot, pokemon, palette, icon) to ESP8266."""
         query: dict[str, object] = {
             "city": city or "Paracas",
             "key": weatherkey or "",
@@ -125,6 +181,17 @@ class RawFrameDriver(DisplayDriver):
                 query["wcity"] = str(weather["city"])
             if weather.get("updated_hm"):
                 query["hm"] = str(weather["updated_hm"])
+        if pokemon is not None:
+            poke_clean = str(pokemon).strip().lower()
+            if poke_clean:
+                query["poke"] = poke_clean
+        if palette is not None:
+            pal_clean = str(palette).strip().lower()
+            if pal_clean:
+                query["pal"] = pal_clean
+        if weather_icon is not None:
+            query["wicon"] = int(weather_icon)
+
         params = urllib.parse.urlencode(query)
         with self._lock:
             try:
@@ -133,9 +200,38 @@ class RawFrameDriver(DisplayDriver):
             except Exception:
                 return False
 
+    def enter_standby(self) -> bool:
+        """Best-effort request to switch ESP8266 into its autonomous offline screen immediately."""
+        with self._lock:
+            prev_timeout = self.timeout
+            short_timeout = min(prev_timeout, 1.5)
+            self.timeout = short_timeout
+            if self._conn is not None:
+                self._conn.timeout = short_timeout
+                if self._conn.sock is not None:
+                    try:
+                        self._conn.sock.settimeout(short_timeout)
+                    except Exception:
+                        pass
+            try:
+                self._request("GET", "/standby")
+                return True
+            except Exception:
+                self._close_conn()
+                return False
+            finally:
+                self.timeout = prev_timeout
+                if self._conn is not None:
+                    self._conn.timeout = prev_timeout
+                    if self._conn.sock is not None:
+                        try:
+                            self._conn.sock.settimeout(prev_timeout)
+                        except Exception:
+                            pass
+
     def invalidate_cache(self) -> None:
         with self._lock:
-            self._last_pushed_hash = ""
+            self._last_pushed_key = ("", 0, 0, "")
 
     def set_brightness(self, level: int) -> bool:
         val = max(0, min(100, int(level)))
@@ -152,7 +248,7 @@ class RawFrameDriver(DisplayDriver):
         with self._lock:
             try:
                 self._request("GET", f"/rotation?val={rot}")
-                self._last_pushed_hash = ""
+                self._last_pushed_key = ("", 0, 0, "")
                 return True
             except Exception as exc:
                 self.last_error = str(exc)
