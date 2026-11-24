@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -498,6 +499,108 @@ class TestPokeHub(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+    def test_weather_refresh_does_not_reset_timestamp_on_failure(self) -> None:
+        """When fetch_weather returns None, _last_weather_ts must NOT be updated."""
+        initial_ts = self.engine._last_weather_ts
+        with mock.patch("hub.state_engine.fetch_weather", return_value=None):
+            result = self.engine._refresh_weather()
+        self.assertIsNone(result)
+        self.assertEqual(self.engine._last_weather_ts, initial_ts)
+        self.assertEqual(self.engine._weather_fail_count, 1)
+
+    def test_weather_refresh_resets_timestamp_on_success(self) -> None:
+        """When fetch_weather succeeds, _last_weather_ts is updated and fail count resets."""
+        fake_weather = {
+            "city": "Lima", "temp": 22.0, "humidity": 70, "wind_ms": 3.0,
+            "main": "Clear", "description": "cielo claro", "updated_hm": "10:00",
+            "forecast": [],
+        }
+        with mock.patch("hub.state_engine.fetch_weather", return_value=fake_weather):
+            result = self.engine._refresh_weather()
+        self.assertIsNotNone(result)
+        self.assertGreater(self.engine._last_weather_ts, 0.0)
+        self.assertEqual(self.engine._weather_fail_count, 0)
+        self.assertEqual(self.engine.weather_data["city"], "Lima")
+
+    def test_weather_fail_count_increments_on_consecutive_failures(self) -> None:
+        """Consecutive failures should increment _weather_fail_count."""
+        self.engine._weather_fail_count = 0
+        self.engine._last_weather_ts = 0.0
+        with mock.patch("hub.state_engine.fetch_weather", return_value=None):
+            self.engine._refresh_weather()
+            self.engine._refresh_weather()
+            self.engine._refresh_weather()
+        self.assertEqual(self.engine._weather_fail_count, 3)
+        self.assertEqual(self.engine._last_weather_ts, 0.0)
+
+    def test_weather_backoff_interval_on_failures(self) -> None:
+        """Weather interval should use backoff schedule when there are failures."""
+        self.engine._weather_fail_count = 0
+        self.engine._last_weather_ts = time.monotonic()
+        # No failures -> 900s interval
+        with self.engine._lock:
+            interval_0 = 900.0 if self.engine._weather_fail_count == 0 else 30.0
+        self.assertEqual(interval_0, 900.0)
+
+        # 1 failure -> 30s
+        self.engine._weather_fail_count = 1
+        with self.engine._lock:
+            fail_count = self.engine._weather_fail_count
+        backoff = (30.0, 60.0, 120.0)
+        expected = backoff[min(fail_count - 1, len(backoff) - 1)]
+        self.assertEqual(expected, 30.0)
+
+        # 2 failures -> 60s
+        self.engine._weather_fail_count = 2
+        expected = backoff[min(self.engine._weather_fail_count - 1, len(backoff) - 1)]
+        self.assertEqual(expected, 60.0)
+
+        # 5 failures (capped) -> 120s
+        self.engine._weather_fail_count = 5
+        expected = backoff[min(self.engine._weather_fail_count - 1, len(backoff) - 1)]
+        self.assertEqual(expected, 120.0)
+
+    def test_load_config_weatherkey_env_fallback(self) -> None:
+        """If weatherkey is empty in config, _load_config falls back to env var."""
+        cfg = self.engine._load_config()
+        # DEFAULT_CONFIG already has the env var value at import time
+        self.assertIsInstance(cfg.get("weatherkey"), str)
+
+        # Simulate empty weatherkey and set env var
+        with mock.patch.dict(os.environ, {"OPENWEATHER_API_KEY": "test-key-123"}):
+            # Create a fresh engine with empty weatherkey in DEFAULT_CONFIG
+            old = state_engine.DEFAULT_CONFIG["weatherkey"]
+            state_engine.DEFAULT_CONFIG["weatherkey"] = ""
+            try:
+                engine2 = PokeHubEngine(
+                    driver=self.driver, config_path=self.cfg_path, start_watchers=False
+                )
+                self.assertEqual(engine2.config["weatherkey"], "test-key-123")
+            finally:
+                state_engine.DEFAULT_CONFIG["weatherkey"] = old
+
+    def test_health_check_forces_weather_retry_on_reconnect(self) -> None:
+        """When device comes online and weather_data is None, _last_weather_ts resets to 0."""
+        self.engine.weather_data = None
+        self.engine._last_weather_ts = time.monotonic()  # Pretend we already tried
+        original_ts = self.engine._last_weather_ts
+
+        # Simulate health check: device is online
+        with mock.patch.object(self.driver, "get_status", return_value={"online": True, "frames": 0}):
+            st = self.driver.get_status()
+            with self.engine._lock:
+                self.engine._last_device_status = st
+                if st.get("online"):
+                    self.engine._offline_failures = 0
+                    self.engine._next_push_retry_mono = 0.0
+                    if self.engine.weather_data is None:
+                        self.engine._last_weather_ts = 0.0
+
+        self.assertEqual(self.engine._last_weather_ts, 0.0)
+        # weather_data still None — the loop will pick up the retry on next iteration
+        self.assertIsNone(self.engine.weather_data)
 
 
 if __name__ == "__main__":

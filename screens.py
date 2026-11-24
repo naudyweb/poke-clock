@@ -222,6 +222,61 @@ def _render_twinkle(x: int, y: int, color: str, alt: bool = False) -> str:
     return f'<rect x="{x + 2}" y="{y + 2}" width="2" height="2" fill="{color}"/>'
 
 
+def _render_defeated_fx(sx: int, sy: int, anim_frame: int) -> str:
+    """Render defeated Pokémon FX: X eyes, spinning stars — like fainting in battle."""
+    f4 = anim_frame % 4
+    parts: list[str] = []
+
+    # X eyes: Charmander eye is at grid (4,3), scale=4 → offset from sprite origin
+    # The eye white pixel is at grid col 4, row 3. With scale=4, that's 4x4 pixels.
+    # Draw a larger, more visible X eye (8x8 pixels) centered on the eye position
+    x_color = "#E83838"
+
+    # Single visible eye (Charmander faces right, one eye visible)
+    # Grid (4,3) → pixel offset: 4*4=16, 3*4=12 from sprite origin
+    # Center the 8x8 X at the eye center: sx+18, sy+14
+    ex, ey = sx + 16, sy + 12
+    # Draw 8x8 X pattern
+    parts.append(
+        f'<rect x="{ex}" y="{ey}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 2}" y="{ey}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 4}" y="{ey}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 6}" y="{ey}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 1}" y="{ey + 1}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 5}" y="{ey + 1}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 2}" y="{ey + 2}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 4}" y="{ey + 2}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 3}" y="{ey + 3}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 2}" y="{ey + 4}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 4}" y="{ey + 4}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 1}" y="{ey + 5}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 5}" y="{ey + 5}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex}" y="{ey + 6}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 2}" y="{ey + 6}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 4}" y="{ey + 6}" width="2" height="2" fill="{x_color}"/>'
+        f'<rect x="{ex + 6}" y="{ey + 6}" width="2" height="2" fill="{x_color}"/>'
+    )
+
+    # Spinning stars around the head (like in Pokémon faint animation)
+    star_positions = [
+        (sx + 44, sy - 4),   # top right
+        (sx + 12, sy - 8),   # top left
+        (sx + 56, sy + 4),   # right
+    ]
+    for idx, (stx, sty) in enumerate(star_positions):
+        # Alternate visibility per frame for spinning effect
+        if (f4 + idx) % 2 == 0:
+            star_y = sty - 2
+        else:
+            star_y = sty
+        parts.append(
+            f'<rect x="{stx + 2}" y="{star_y}" width="2" height="6" fill="#F8E030"/>'
+            f'<rect x="{stx}" y="{star_y + 2}" width="6" height="2" fill="#F8E030"/>'
+        )
+
+    return "".join(parts)
+
+
 def _render_species_fx(sprite_key: str, sx: int, sy: int, anim_frame: int) -> str:
     """Authentic Gen-2 expressive micro-FX per Pokémon species (all strictly inside y=8..92)."""
     f4 = anim_frame % 4
@@ -353,14 +408,30 @@ def build_gemini_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
     pal = resolve_palette(cfg, now)
     sprites = (cfg or {}).get("sprites") or {}
     sp_key, sp_grid, sp_pal, _ = _get_sprite(sprites.get("gemini", "pikachu"), "pikachu")
-    dx, dy, sh = _pokemon_motion(sp_key, anim_frame)
+
+    out_of_tokens = stats.get("out_of_tokens", False)
+
+    if out_of_tokens:
+        # Defeated: Pokémon falls to the ground, no shake
+        dx, dy, sh = 0, 20, 4  # dropped down by 20px, larger shadow
+    else:
+        dx, dy, sh = _pokemon_motion(sp_key, anim_frame)
 
     today_total_str = fmt_tokens(stats["today_total"])
-    in_str = fmt_tokens(stats["today_in"])
-    out_str = fmt_tokens(stats["today_out"])
-    cache_str = fmt_tokens(stats["today_cache"])
     week_total_str = fmt_tokens(stats["week_total"])
     updated_hm = stats["updated_hm"]
+    daily_reset = stats.get("daily_reset", "--:--")
+    weekly_reset = stats.get("weekly_reset", "--:--")
+
+    if out_of_tokens:
+        # Replace IN/OUT with reset counters when out of tokens
+        in_str = daily_reset
+        out_str = weekly_reset
+        cache_str = "--"
+    else:
+        in_str = fmt_tokens(stats["today_in"])
+        out_str = fmt_tokens(stats["today_out"])
+        cache_str = fmt_tokens(stats["today_cache"])
     steps = stats["today_steps"]
     lv_val = min(99, max(1, steps)) if steps > 0 else 1
     cache_pct = stats["cache_pct"]
@@ -376,35 +447,49 @@ def build_gemini_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
     hp_fill_w = (max(2, int(round((cache_pct / 100.0) * hp_max_w))) // 2) * 2 if cache_pct > 0 else 0
     hero_scale = 4 if pixel_text_width(today_total_str, 4) <= 122 else 3
 
-    max_day = max((d["total"] for d in stats["week_days"]), default=0)
-    bar_parts: list[str] = []
-    start_x, slot_w, bar_w, base_y, max_h = 20, 29, 18, 148, 24
+    # Build bars or "SIN TOKENS" message
+    if out_of_tokens:
+        # Flash the message every 2 frames
+        f4 = anim_frame % 4
+        show_msg = f4 < 3  # visible 3 out of 4 frames (blink effect)
+        if show_msg:
+            bar_parts_svg = render_pixel_text("SIN TOKENS", 120, 130, 3, "#E83838", align="center", shadow=pal['shadow'], shadow_offset=2)
+            bar_parts_svg += render_pixel_text("ESPERA MAÑANA", 120, 152, 2, pal['muted'], align="center")
+        else:
+            bar_parts_svg = render_pixel_text("SIN TOKENS", 120, 130, 3, pal['muted'], align="center")
+            bar_parts_svg += render_pixel_text("ESPERA MAÑANA", 120, 152, 2, pal['bar_empty'], align="center")
+    else:
+        max_day = max((d["total"] for d in stats["week_days"]), default=0)
+        bar_parts: list[str] = []
+        start_x, slot_w, bar_w, base_y, max_h = 20, 29, 18, 148, 24
 
-    for idx, day in enumerate(stats["week_days"]):
-        bx = start_x + idx * slot_w
-        cx = bx + bar_w // 2
-        val = day["total"]
-        if max_day > 0 and val > 0:
-            h = (max(6, int(round((val / max_day) * max_h))) // 2) * 2
-        else:
-            h = 2
-        by = base_y - h
-        if day["is_today"]:
-            fill, hi, border, lbl_col = "#F8B800", "#FFF090", pal["border"], pal["ink"]
-        elif val > 0:
-            fill, hi, border, lbl_col = "#3898F8", "#88D0FF", pal["border"], pal["muted"]
-        else:
-            fill, hi, border, lbl_col = pal["bar_empty"], pal["bar_empty"], pal["muted"], pal["muted"]
+        for idx, day in enumerate(stats["week_days"]):
+            bx = start_x + idx * slot_w
+            cx = bx + bar_w // 2
+            val = day["total"]
+            if max_day > 0 and val > 0:
+                h = (max(6, int(round((val / max_day) * max_h))) // 2) * 2
+            else:
+                h = 2
+            by = base_y - h
+            if day["is_today"]:
+                fill, hi, border, lbl_col = "#F8B800", "#FFF090", pal["border"], pal["ink"]
+            elif val > 0:
+                fill, hi, border, lbl_col = "#3898F8", "#88D0FF", pal["border"], pal["muted"]
+            else:
+                fill, hi, border, lbl_col = pal["bar_empty"], pal["bar_empty"], pal["muted"], pal["muted"]
 
-        if h >= 6:
-            bar_parts.append(
-                f'<rect x="{bx}" y="{by}" width="{bar_w}" height="{h}" fill="{border}"/>'
-                f'<rect x="{bx + 2}" y="{by + 2}" width="{bar_w - 4}" height="{max(2, h - 4)}" fill="{fill}"/>'
-                f'<rect x="{bx + 2}" y="{by + 2}" width="{bar_w - 4}" height="2" fill="{hi}"/>'
-            )
-        else:
-            bar_parts.append(f'<rect x="{bx}" y="{by}" width="{bar_w}" height="2" fill="{border}"/>')
-        bar_parts.append(render_pixel_text(day["label"], cx, 152, 2, lbl_col, align="center"))
+            if h >= 6:
+                bar_parts.append(
+                    f'<rect x="{bx}" y="{by}" width="{bar_w}" height="{h}" fill="{border}"/>'
+                    f'<rect x="{bx + 2}" y="{by + 2}" width="{bar_w - 4}" height="{max(2, h - 4)}" fill="{fill}"/>'
+                    f'<rect x="{bx + 2}" y="{by + 2}" width="{bar_w - 4}" height="2" fill="{hi}"/>'
+                )
+            else:
+                bar_parts.append(f'<rect x="{bx}" y="{by}" width="{bar_w}" height="2" fill="{border}"/>')
+            bar_parts.append(render_pixel_text(day["label"], cx, 152, 2, lbl_col, align="center"))
+
+        bar_parts_svg = "".join(bar_parts)
 
     f4 = anim_frame % 4
     sparkle_svg = (
@@ -424,8 +509,8 @@ def build_gemini_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
   {render_pixel_text("GEMINI", 28, 12, 2, pal['ink'])}
   {render_pixel_text(f"Lv{lv_val}", 146, 12, 2, pal['blue'], align="right")}
 
-  {render_sprite(sp_grid, sp_pal, sx, sy, 4)}
-  {_render_species_fx(sp_key, sx, sy, anim_frame)}
+  {f'<g opacity="0.4">{render_sprite(sp_grid, sp_pal, sx, sy, 4)}</g>' if out_of_tokens else render_sprite(sp_grid, sp_pal, sx, sy, 4)}
+  {(_render_defeated_fx(sx, sy, anim_frame) if out_of_tokens else _render_species_fx(sp_key, sx, sy, anim_frame))}
   {sparkle_svg}
 
   <rect x="14" y="30" width="22" height="12" fill="{pal['border']}"/>
@@ -443,13 +528,15 @@ def build_gemini_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
   {render_pixel_text("EXP 7D", 16, 106, 2, pal['blue'])}
   {render_pixel_text(week_total_str, 224, 106, 2, pal['ink'], align="right")}
   {render_dotted_rule(16, 120, 208, pal['divider'])}
-  {"".join(bar_parts)}
+  {bar_parts_svg}
 
   {_render_dialogue_box_themed(8, 172, 224, 62, pal)}
-  {render_pixel_text(f"IN:{in_str}", 20, 186, 2, pal['ink'])}
-  {render_pixel_text(f"OUT:{out_str}", 216, 186, 2, pal['ink'], align="right")}
+  {render_pixel_text(f"IN:{in_str}", 20, 186, 2, pal['ink']) if not out_of_tokens else render_pixel_text(f"D:{in_str}", 20, 186, 2, pal['ink'])}
+  {render_pixel_text(f"OUT:{out_str}", 216, 186, 2, pal['ink'], align="right") if not out_of_tokens else render_pixel_text(f"W:{out_str}", 216, 186, 2, pal['ink'], align="right")}
   {render_pixel_text(f"CCH:{cache_str}", 20, 206, 2, pal['blue'])}
   {render_pixel_text(updated_hm, 200, 206, 2, pal['muted'], align="right")}
+  {render_pixel_text(f"D:{daily_reset}", 20, 222, 2, pal['muted']) if not out_of_tokens else ""}
+  {render_pixel_text(f"W:{weekly_reset}", 216, 222, 2, pal['muted'], align="right") if not out_of_tokens else ""}
 </svg>
 '''
 

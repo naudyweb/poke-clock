@@ -79,6 +79,7 @@ DEFAULT_CONFIG = {
         "weather": True,
         "gemini": True,
     },
+    "gemini_daily_limit": 40_000_000,
 }
 
 TRANSCRIPT_GLOBS = [
@@ -90,6 +91,7 @@ TRANSCRIPT_GLOBS = [
 DAY_LABELS_ES = ["L", "M", "X", "J", "V", "S", "D"]
 
 _BACKOFF_SCHEDULE = (5.0, 15.0, 30.0)
+_WEATHER_BACKOFF_SCHEDULE = (30.0, 60.0, 120.0)
 _BRIGHTNESS_SAVE_DEBOUNCE_S = 1.5
 _GEMINI_RETENTION_S = 8 * 86400
 
@@ -121,14 +123,33 @@ def _parse_gemini_file(path: str, local_tz, tz_offset) -> dict:
     conv_id = Path(path).parents[2].name
     by_date: dict = {}
     seen_steps: set[int] = set()
+    has_quota_error = False
 
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            if '"input_tokens"' not in line and '"output_tokens"' not in line:
+            stripped = line.strip()
+            if not stripped:
                 continue
             try:
-                rec = json.loads(line)
+                rec = json.loads(stripped)
             except json.JSONDecodeError:
+                continue
+
+            # Detect quota/limit errors in any record
+            status = str(rec.get("status", "")).upper()
+            content = str(rec.get("content", "")).lower()
+            thinking = str(rec.get("thinking", "")).lower()
+            rec_text = content + " " + thinking
+            if (
+                status == "ERROR"
+                or "quota" in rec_text
+                or "429" in rec_text
+                or ("limit" in rec_text and ("exceed" in rec_text or "reached" in rec_text or "exceeded" in rec_text))
+                or ("token" in rec_text and ("limit" in rec_text or "exceed" in rec_text or "out" in rec_text))
+            ):
+                has_quota_error = True
+
+            if '"input_tokens"' not in line and '"output_tokens"' not in line:
                 continue
             it = int(rec.get("input_tokens") or 0)
             ot = int(rec.get("output_tokens") or 0)
@@ -162,6 +183,7 @@ def _parse_gemini_file(path: str, local_tz, tz_offset) -> dict:
         "conv_id": conv_id,
         "tz_offset": tz_offset,
         "by_date": frozen_dates,
+        "has_quota_error": has_quota_error,
     }
 
 
@@ -179,6 +201,7 @@ def collect_gemini_usage() -> dict:
     daily_total: dict = defaultdict(int)
     today_in = today_out = today_cache = today_steps = 0
     today_sessions: set[str] = set()
+    any_quota_error = False
 
     files: set[str] = set()
     for pattern in TRANSCRIPT_GLOBS:
@@ -229,6 +252,10 @@ def collect_gemini_usage() -> dict:
             if row is not None:
                 daily_total[d] += row[0]
 
+        # Track quota errors from transcripts
+        if buckets.get("has_quota_error"):
+            any_quota_error = True
+
         today_row = by_date.get(today)
         if today_row is not None and today_row[4] > 0:
             today_in += today_row[1]
@@ -242,6 +269,31 @@ def collect_gemini_usage() -> dict:
     denom = today_in + today_cache
     cache_pct = int(round((today_cache / denom) * 100)) if denom > 0 else 0
 
+    # Daily reset: next midnight
+    tomorrow = today + timedelta(days=1)
+    midnight_tomorrow = datetime.combine(tomorrow, datetime.min.time(), tzinfo=local_tz)
+    daily_reset_delta = midnight_tomorrow - local_now
+    daily_reset_h = int(daily_reset_delta.total_seconds() // 3600)
+    daily_reset_m = int((daily_reset_delta.total_seconds() % 3600) // 60)
+    daily_reset_str = f"{daily_reset_h:02d}:{daily_reset_m:02d}"
+
+    # Weekly reset: next Monday midnight (week ends Sunday 23:59)
+    # weekday(): Monday=0, Sunday=6. Days until next Monday:
+    days_until_monday = (7 - local_now.weekday()) % 7
+    if days_until_monday == 0:
+        days_until_monday = 7  # if today is Monday, reset is next Monday
+    next_monday = today + timedelta(days=days_until_monday)
+    midnight_monday = datetime.combine(next_monday, datetime.min.time(), tzinfo=local_tz)
+    weekly_reset_delta = midnight_monday - local_now
+    weekly_reset_total_h = int(weekly_reset_delta.total_seconds() // 3600)
+    weekly_reset_m = int((weekly_reset_delta.total_seconds() % 3600) // 60)
+    if weekly_reset_total_h >= 24:
+        w_days = weekly_reset_total_h // 24
+        w_hours = weekly_reset_total_h % 24
+        weekly_reset_str = f"{w_days}d{w_hours:02d}h"
+    else:
+        weekly_reset_str = f"{weekly_reset_total_h:02d}:{weekly_reset_m:02d}"
+
     return {
         "today_date": today.isoformat(),
         "updated_hm": local_now.strftime("%H:%M"),
@@ -253,6 +305,9 @@ def collect_gemini_usage() -> dict:
         "today_sessions": len(today_sessions),
         "cache_pct": cache_pct,
         "week_total": week_total,
+        "quota_error": any_quota_error,
+        "daily_reset": daily_reset_str,
+        "weekly_reset": weekly_reset_str,
         "week_days": [
             {
                 "date": d.isoformat(),
@@ -391,6 +446,9 @@ class PokeHubEngine:
         self._next_push_retry_mono: float = 0.0
         self._config_dirty_at: float | None = None
 
+        # Weather retry backoff
+        self._weather_fail_count: int = 0
+
         # Rendered JPEG cache per card + pre-rendered PC-side animation bundles
         self._jpg_cache: dict[str, tuple[str, bytes]] = {}
         self._anim_cache: dict[str, list[dict]] = {}
@@ -435,6 +493,9 @@ class PokeHubEngine:
                         cfg[k] = v
         except Exception:
             pass
+        # Fallback: si weatherkey está vacío, intentar variable de entorno
+        if not cfg.get("weatherkey"):
+            cfg["weatherkey"] = os.environ.get("OPENWEATHER_API_KEY", "")
         return cfg
 
     def _save_config(self) -> None:
@@ -1157,6 +1218,15 @@ class PokeHubEngine:
             if g is None:
                 g = collect_gemini_usage()
                 snapshot["gemini_stats"] = g
+            # Ensure out_of_tokens flag is present for older cached stats
+            if "out_of_tokens" not in g:
+                daily_limit = int(cfg.get("gemini_daily_limit", 0))
+                if daily_limit > 0 and g["today_total"] >= daily_limit:
+                    g["out_of_tokens"] = True
+                elif g.get("quota_error"):
+                    g["out_of_tokens"] = True
+                else:
+                    g["out_of_tokens"] = False
             return build_gemini_svg(g, cfg, anim_frame=anim_frame, now=now)
         if card == "spotify" and snapshot["spotify_track"]:
             return build_spotify_svg(snapshot["spotify_track"], cfg, anim_frame=anim_frame, now=now)
@@ -1237,6 +1307,14 @@ class PokeHubEngine:
 
     def _refresh_gemini(self) -> None:
         stats = collect_gemini_usage()
+        # Compute out_of_tokens: quota error in logs OR daily limit exceeded
+        daily_limit = int(self.config.get("gemini_daily_limit", 0))
+        if daily_limit > 0 and stats["today_total"] >= daily_limit:
+            stats["out_of_tokens"] = True
+        elif stats.get("quota_error"):
+            stats["out_of_tokens"] = True
+        else:
+            stats["out_of_tokens"] = False
         snap = None
         with self._lock:
             old = self.gemini_stats
@@ -1247,6 +1325,8 @@ class PokeHubEngine:
                 or old["today_total"] != stats["today_total"]
                 or old["today_steps"] != stats["today_steps"]
                 or old["today_date"] != stats["today_date"]
+                or old.get("out_of_tokens") != stats.get("out_of_tokens")
+                or old.get("quota_error") != stats.get("quota_error")
             )
             if changed:
                 self._invalidate_cards_locked("gemini")
@@ -1263,13 +1343,16 @@ class PokeHubEngine:
         snap = None
         active = ""
         with self._lock:
-            self._last_weather_ts = time.monotonic()
             if w:
+                self._last_weather_ts = time.monotonic()
+                self._weather_fail_count = 0
                 self.weather_data = w
                 self._invalidate_cards_locked("weather", "clock")
                 active = self.active_card
                 if active in ("weather", "clock"):
                     snap = self._snapshot_for_render_locked(active)
+            else:
+                self._weather_fail_count += 1
         if snap is not None:
             self._render_and_store(active, snap)
         if w:
@@ -1485,8 +1568,14 @@ class PokeHubEngine:
             if (now_mono - self._last_gemini_ts) >= 8.0:
                 self._refresh_gemini()
 
-            # 3. Weather check every 15 min
-            if (now_mono - self._last_weather_ts) >= 900.0:
+            # 3. Weather check — use backoff on failures, 15 min on success
+            with self._lock:
+                weather_interval = (
+                    _WEATHER_BACKOFF_SCHEDULE[min(self._weather_fail_count - 1, len(_WEATHER_BACKOFF_SCHEDULE) - 1)]
+                    if self._weather_fail_count > 0
+                    else 900.0
+                )
+            if (now_mono - self._last_weather_ts) >= weather_interval:
                 self._refresh_weather()
 
             # 4. Health check & auto-re-detect driver every 20s
@@ -1502,6 +1591,9 @@ class PokeHubEngine:
                     if st.get("online"):
                         self._offline_failures = 0
                         self._next_push_retry_mono = 0.0
+                        # If weather data is missing, force a retry now that we're online
+                        if self.weather_data is None:
+                            self._last_weather_ts = 0.0
                 if not st.get("online"):
                     if not ext_drv:
                         new_drv = self._detect_driver(host)
