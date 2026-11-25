@@ -12,6 +12,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -32,6 +33,7 @@ from screens import (
     DAYS_SHORT_ES,
     OFFLINE_PALETTE_ORDER,
     OFFLINE_POKEMON_ORDER,
+    build_claude_svg,
     build_clock_svg,
     build_gemini_svg,
     build_notify_svg,
@@ -71,6 +73,7 @@ DEFAULT_CONFIG = {
         "clock_day": "bulbasaur",
         "clock_night": "gengar",
         "gemini": "pikachu",
+        "claude": "charmander",
         "spotify": "jigglypuff",
         "weather": "auto",
     },
@@ -78,8 +81,10 @@ DEFAULT_CONFIG = {
         "clock": True,
         "weather": True,
         "gemini": True,
+        "claude": True,
     },
-    "gemini_daily_limit": 40_000_000,
+    "gemini_daily_limit": 0,
+    "claude_daily_limit": 0,
 }
 
 TRANSCRIPT_GLOBS = [
@@ -87,6 +92,8 @@ TRANSCRIPT_GLOBS = [
     str(Path.home() / ".gemini" / "antigravity" / "brain" / "*" / ".system_generated" / "logs" / "transcript.jsonl"),
     str(Path.home() / ".gemini" / "antigravity-ide" / "brain" / "*" / ".system_generated" / "logs" / "transcript.jsonl"),
 ]
+
+CLAUDE_PROJECT_GLOB = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
 
 DAY_LABELS_ES = ["L", "M", "X", "J", "V", "S", "D"]
 
@@ -98,6 +105,12 @@ _GEMINI_RETENTION_S = 8 * 86400
 _GEMINI_CACHE_LOCK = threading.Lock()
 # Maps realpath -> (st_mtime_ns, st_size, parsed_buckets)
 _GEMINI_FILE_CACHE: dict[str, tuple[int, int, dict]] = {}
+
+_CLAUDE_CACHE_LOCK = threading.Lock()
+# Maps realpath -> (st_mtime_ns, st_size, parsed_cost_state)
+_CLAUDE_FILE_CACHE: dict[str, tuple[int, int, dict | None]] = {}
+
+_CLAUDE_RETENTION_S = 8 * 86400
 
 
 def render_svg_to_jpg_bytes(svg_content: str, bg_hex: str = "#F8F8F0") -> bytes:
@@ -119,11 +132,71 @@ def _parse_iso_local(ts: str, local_tz) -> datetime | None:
         return None
 
 
+_QUOTA_RESET_PHRASE_RE = re.compile(
+    r"(?:reset\s+(?:after|in)|try\s+again\s+in|retry\s+(?:after|in)|wait(?:\s+for)?|after)\s+"
+    r"((?:\d+\s*(?:d|days?|h|hours?|hr|hrs|m|mins?|minutes?|s|secs?|seconds?)\s*,?\s*)+)",
+    re.IGNORECASE,
+)
+_DURATION_PART_RE = re.compile(
+    r"(\d+)\s*(d|days?|h|hours?|hr|hrs|m|mins?|minutes?|s|secs?|seconds?)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_quota_reset_seconds(text: str) -> int | None:
+    """Extract optional cooldown duration in seconds from a quota error message."""
+    if not text:
+        return None
+    m = _QUOTA_RESET_PHRASE_RE.search(text)
+    segment = m.group(1) if m else text
+    matches = _DURATION_PART_RE.findall(segment)
+    if not matches:
+        return None
+    if not m and len(matches) < 2:
+        # Without an explicit phrase like "reset after" / "try again in", require at least
+        # two units (e.g. "1h 5m 10s") so unrelated numbers like "429" or "5m" aren't misread.
+        return None
+    total = 0
+    for raw_val, raw_unit in matches:
+        val = int(raw_val)
+        unit = raw_unit[0].lower()
+        if unit == "d":
+            total += val * 86400
+        elif unit == "h":
+            total += val * 3600
+        elif unit == "m":
+            total += val * 60
+        elif unit == "s":
+            total += val
+    return total if total > 0 else None
+
+
+def _is_quota_error_text(err_text: str) -> bool:
+    if not err_text:
+        return False
+    return (
+        "quota" in err_text
+        or "429" in err_text
+        or "resource_exhausted" in err_text
+        or "rate limit" in err_text
+        or "rate_limit" in err_text
+        or "too many requests" in err_text
+        or "capacity" in err_text
+        or "exhausted" in err_text
+        or ("limit" in err_text and any(k in err_text for k in ("exceed", "reach", "exhaust")))
+        or ("token" in err_text and any(k in err_text for k in ("limit", "exceed", "exhaust", "out")))
+    )
+
+
 def _parse_gemini_file(path: str, local_tz, tz_offset) -> dict:
     conv_id = Path(path).parents[2].name
     by_date: dict = {}
     seen_steps: set[int] = set()
-    has_quota_error = False
+    last_quota_error_ts: float | None = None
+    last_quota_error_date = None
+    quota_reset_at_ts: float | None = None
+    last_success_ts: float | None = None
+    fallback_dt: datetime | None = None
 
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -135,19 +208,37 @@ def _parse_gemini_file(path: str, local_tz, tz_offset) -> dict:
             except json.JSONDecodeError:
                 continue
 
-            # Detect quota/limit errors in any record
-            status = str(rec.get("status", "")).upper()
-            content = str(rec.get("content", "")).lower()
-            thinking = str(rec.get("thinking", "")).lower()
-            rec_text = content + " " + thinking
-            if (
-                status == "ERROR"
-                or "quota" in rec_text
-                or "429" in rec_text
-                or ("limit" in rec_text and ("exceed" in rec_text or "reached" in rec_text or "exceeded" in rec_text))
-                or ("token" in rec_text and ("limit" in rec_text or "exceed" in rec_text or "out" in rec_text))
-            ):
-                has_quota_error = True
+            status = str(rec.get("status") or "").upper()
+            rec_type = str(rec.get("type") or "").upper()
+            has_err_field = bool(rec.get("error"))
+            is_error_record = status == "ERROR" or "ERROR" in rec_type or has_err_field
+
+            dt = _parse_iso_local(str(rec.get("created_at") or ""), local_tz)
+
+            if is_error_record:
+                err_parts = [
+                    str(rec.get("error") or ""),
+                    str(rec.get("message") or ""),
+                    str(rec.get("content") or ""),
+                ]
+                err_text = " ".join(p for p in err_parts if p).lower()
+                if _is_quota_error_text(err_text):
+                    err_dt = dt
+                    if err_dt is None:
+                        if fallback_dt is None:
+                            try:
+                                fallback_dt = datetime.fromtimestamp(
+                                    os.path.getmtime(path), tz=timezone.utc
+                                ).astimezone(local_tz)
+                            except OSError:
+                                fallback_dt = datetime.now().astimezone(local_tz)
+                        err_dt = fallback_dt
+                    err_ts = err_dt.timestamp()
+                    if last_quota_error_ts is None or err_ts >= last_quota_error_ts:
+                        last_quota_error_ts = err_ts
+                        last_quota_error_date = err_dt.date()
+                        dur = _parse_quota_reset_seconds(err_text)
+                        quota_reset_at_ts = (err_ts + dur) if dur is not None else None
 
             if '"input_tokens"' not in line and '"output_tokens"' not in line:
                 continue
@@ -163,9 +254,13 @@ def _parse_gemini_file(path: str, local_tz, tz_offset) -> dict:
                     continue
                 seen_steps.add(s_idx)
 
-            dt = _parse_iso_local(str(rec.get("created_at") or ""), local_tz)
             if dt is None:
                 continue
+            if not is_error_record:
+                ts_val = dt.timestamp()
+                if last_success_ts is None or ts_val > last_success_ts:
+                    last_success_ts = ts_val
+
             d = dt.date()
             step_total = it + ot + ct
             prev = by_date.get(d)
@@ -183,7 +278,11 @@ def _parse_gemini_file(path: str, local_tz, tz_offset) -> dict:
         "conv_id": conv_id,
         "tz_offset": tz_offset,
         "by_date": frozen_dates,
-        "has_quota_error": has_quota_error,
+        "has_quota_error": last_quota_error_ts is not None,
+        "last_quota_error_ts": last_quota_error_ts,
+        "last_quota_error_date": last_quota_error_date,
+        "quota_reset_at_ts": quota_reset_at_ts,
+        "last_success_ts": last_success_ts,
     }
 
 
@@ -201,7 +300,10 @@ def collect_gemini_usage() -> dict:
     daily_total: dict = defaultdict(int)
     today_in = today_out = today_cache = today_steps = 0
     today_sessions: set[str] = set()
-    any_quota_error = False
+    latest_quota_error_ts: float | None = None
+    latest_quota_error_date = None
+    latest_quota_reset_at_ts: float | None = None
+    latest_success_ts: float | None = None
 
     files: set[str] = set()
     for pattern in TRANSCRIPT_GLOBS:
@@ -252,9 +354,15 @@ def collect_gemini_usage() -> dict:
             if row is not None:
                 daily_total[d] += row[0]
 
-        # Track quota errors from transcripts
-        if buckets.get("has_quota_error"):
-            any_quota_error = True
+        q_ts = buckets.get("last_quota_error_ts")
+        if q_ts is not None and (latest_quota_error_ts is None or q_ts >= latest_quota_error_ts):
+            latest_quota_error_ts = q_ts
+            latest_quota_error_date = buckets.get("last_quota_error_date")
+            latest_quota_reset_at_ts = buckets.get("quota_reset_at_ts")
+
+        s_ts = buckets.get("last_success_ts")
+        if s_ts is not None and (latest_success_ts is None or s_ts > latest_success_ts):
+            latest_success_ts = s_ts
 
         today_row = by_date.get(today)
         if today_row is not None and today_row[4] > 0:
@@ -264,15 +372,25 @@ def collect_gemini_usage() -> dict:
             today_steps += today_row[4]
             today_sessions.add(buckets["conv_id"])
 
+    any_quota_error = (
+        latest_quota_error_ts is not None
+        and latest_quota_error_date == today
+        and (latest_quota_reset_at_ts is None or now_ts < latest_quota_reset_at_ts)
+        and (latest_success_ts is None or latest_quota_error_ts >= latest_success_ts)
+    )
+
     today_total = today_in + today_out + today_cache
     week_total = sum(daily_total[d] for d in week_dates)
     denom = today_in + today_cache
     cache_pct = int(round((today_cache / denom) * 100)) if denom > 0 else 0
 
-    # Daily reset: next midnight
+    # Daily reset: cooldown expiration if active, otherwise next midnight
     tomorrow = today + timedelta(days=1)
     midnight_tomorrow = datetime.combine(tomorrow, datetime.min.time(), tzinfo=local_tz)
-    daily_reset_delta = midnight_tomorrow - local_now
+    if any_quota_error and latest_quota_reset_at_ts is not None and latest_quota_reset_at_ts > now_ts:
+        daily_reset_delta = timedelta(seconds=max(0.0, latest_quota_reset_at_ts - now_ts))
+    else:
+        daily_reset_delta = max(timedelta(0), midnight_tomorrow - local_now)
     daily_reset_h = int(daily_reset_delta.total_seconds() // 3600)
     daily_reset_m = int((daily_reset_delta.total_seconds() % 3600) // 60)
     daily_reset_str = f"{daily_reset_h:02d}:{daily_reset_m:02d}"
@@ -382,6 +500,184 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# ============================================================
+# Claude Code usage tracking
+# ============================================================
+
+def _parse_claude_file(path: str, local_tz) -> dict | None:
+    """Parse the last cost-state entry from a Claude Code session JSONL file.
+    
+    Returns the last cost-state dict or None if no cost-state with modelUsage found.
+    """
+    last_cost = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    rec = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("type") == "cost-state" and rec.get("modelUsage"):
+                    last_cost = rec
+    except OSError:
+        pass
+    return last_cost
+
+
+def collect_claude_usage() -> dict:
+    """Collect Claude Code token usage from ~/.claude/projects session files.
+    
+    Returns a dict with the same structure as collect_gemini_usage() for compatibility
+    with the battle HUD screen renderer.
+    """
+    local_now = datetime.now().astimezone()
+    local_tz = local_now.tzinfo
+    today = local_now.date()
+    week_dates = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    week_set = set(week_dates)
+
+    now_ts = time.time()
+    cutoff_mtime = now_ts - _CLAUDE_RETENTION_S
+
+    daily_total: dict = defaultdict(int)
+    today_in = today_out = today_cache = today_steps = 0
+    today_sessions: set[str] = set()
+    any_quota_error = False
+
+    files: set[str] = set()
+    for path in glob.glob(CLAUDE_PROJECT_GLOB, recursive=True):
+        rp = os.path.realpath(path)
+        files.add(rp)
+
+    with _CLAUDE_CACHE_LOCK:
+        stale = [k for k in _CLAUDE_FILE_CACHE if k not in files]
+        for k in stale:
+            del _CLAUDE_FILE_CACHE[k]
+
+    for path in sorted(files):
+        try:
+            st = os.stat(path)
+        except OSError:
+            with _CLAUDE_CACHE_LOCK:
+                _CLAUDE_FILE_CACHE.pop(path, None)
+            continue
+
+        if st.st_mtime < cutoff_mtime:
+            with _CLAUDE_CACHE_LOCK:
+                _CLAUDE_FILE_CACHE.pop(path, None)
+            continue
+
+        cost_state = None
+        with _CLAUDE_CACHE_LOCK:
+            cached = _CLAUDE_FILE_CACHE.get(path)
+            if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+                cost_state = cached[2]
+
+        if cost_state is None:
+            cost_state = _parse_claude_file(path, local_tz)
+            with _CLAUDE_CACHE_LOCK:
+                _CLAUDE_FILE_CACHE[path] = (st.st_mtime_ns, st.st_size, cost_state)
+
+        if cost_state is None:
+            continue
+
+        # startTime is in milliseconds
+        start_ms = cost_state.get("startTime", 0)
+        if start_ms == 0:
+            continue
+
+        start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).astimezone(local_tz)
+        d = start_dt.date()
+
+        model_usage = cost_state.get("modelUsage", {})
+        if not model_usage:
+            continue
+
+        # Sum all tokens across models
+        total_tokens = 0
+        in_tokens = 0
+        out_tokens = 0
+        cache_tokens = 0
+
+        for model, usage in model_usage.items():
+            inp = int(usage.get("inputTokens", 0))
+            out = int(usage.get("outputTokens", 0))
+            thinking = int(usage.get("thinkingTokens", 0))
+            cache_read = int(usage.get("cacheReadInputTokens", 0))
+            cache_creation = int(usage.get("cacheCreationInputTokens", 0))
+
+            in_tokens += inp
+            out_tokens += out + thinking
+            cache_tokens += cache_read + cache_creation
+            total_tokens += inp + out + thinking + cache_read + cache_creation
+
+        daily_total[d] += total_tokens
+
+        if d == today:
+            today_in += in_tokens
+            today_out += out_tokens
+            today_cache += cache_tokens
+            today_steps += 1
+            today_sessions.add(cost_state.get("sessionId", path))
+
+    today_total = today_in + today_out + today_cache
+    week_total = sum(daily_total[d] for d in week_dates)
+    denom = today_in + today_cache
+    cache_pct = int(round((today_cache / denom) * 100)) if denom > 0 else 0
+
+    # Daily reset: next midnight
+    tomorrow = today + timedelta(days=1)
+    midnight_tomorrow = datetime.combine(tomorrow, datetime.min.time(), tzinfo=local_tz)
+    daily_reset_delta = midnight_tomorrow - local_now
+    daily_reset_h = int(daily_reset_delta.total_seconds() // 3600)
+    daily_reset_m = int((daily_reset_delta.total_seconds() % 3600) // 60)
+    daily_reset_str = f"{daily_reset_h:02d}:{daily_reset_m:02d}"
+
+    # Weekly reset: next Monday midnight
+    days_until_monday = (7 - local_now.weekday()) % 7
+    if days_until_monday == 0:
+        days_until_monday = 7
+    next_monday = today + timedelta(days=days_until_monday)
+    midnight_monday = datetime.combine(next_monday, datetime.min.time(), tzinfo=local_tz)
+    weekly_reset_delta = midnight_monday - local_now
+    weekly_reset_total_h = int(weekly_reset_delta.total_seconds() // 3600)
+    weekly_reset_m = int((weekly_reset_delta.total_seconds() % 3600) // 60)
+    if weekly_reset_total_h >= 24:
+        w_days = weekly_reset_total_h // 24
+        w_hours = weekly_reset_total_h % 24
+        weekly_reset_str = f"{w_days}d{w_hours:02d}h"
+    else:
+        weekly_reset_str = f"{weekly_reset_total_h:02d}:{weekly_reset_m:02d}"
+
+    return {
+        "today_date": today.isoformat(),
+        "updated_hm": local_now.strftime("%H:%M"),
+        "today_total": today_total,
+        "today_in": today_in,
+        "today_out": today_out,
+        "today_cache": today_cache,
+        "today_steps": today_steps,
+        "today_sessions": len(today_sessions),
+        "cache_pct": cache_pct,
+        "week_total": week_total,
+        "quota_error": any_quota_error,
+        "daily_reset": daily_reset_str,
+        "weekly_reset": weekly_reset_str,
+        "week_days": [
+            {
+                "date": d.isoformat(),
+                "label": DAY_LABELS_ES[d.weekday()],
+                "total": daily_total[d],
+                "is_today": d == today,
+            }
+            for d in week_dates
+        ],
+    }
+
+
 def _resolve_weather_icon(weather_data: dict | None, now: datetime) -> int | None:
     """Map weather condition to firmware WeatherIconIndex (0=sun,1=cloud,2=rain,3=storm,4=moon)."""
     if not weather_data:
@@ -425,6 +721,7 @@ class PokeHubEngine:
         self.notify_state: dict | None = None
         self.spotify_track: dict | None = None
         self.gemini_stats: dict | None = None
+        self.claude_stats: dict | None = None
         self.weather_data: dict | None = None
 
         self.active_card: str = "clock"
@@ -433,6 +730,7 @@ class PokeHubEngine:
         self._last_rotate_ts: float = time.monotonic()
         self._last_weather_ts: float = 0.0
         self._last_gemini_ts: float = 0.0
+        self._last_claude_ts: float = 0.0
         self._last_clock_hm: str = ""
         self._last_device_status: dict = {}
         self._last_night_state: bool | None = None
@@ -632,7 +930,7 @@ class PokeHubEngine:
 
     def show_card(self, card: str) -> dict:
         card = card.strip().lower()
-        if card not in ("clock", "weather", "gemini", "spotify"):
+        if card not in ("clock", "weather", "gemini", "claude", "spotify"):
             raise ValueError(f"Unknown card: {card}")
         if card == "spotify":
             with self._lock:
@@ -796,6 +1094,8 @@ class PokeHubEngine:
     def update_config(self, patch: dict) -> dict:
         re_render_weather = False
         re_render_all = False
+        refresh_gemini = False
+        refresh_claude = False
         sync_offline = False
         new_host: str | None = None
         new_rot: int | None = None
@@ -803,20 +1103,20 @@ class PokeHubEngine:
 
         with self._lock:
             if "enabled_cards" in patch and isinstance(patch["enabled_cards"], dict):
-                for k in ("clock", "weather", "gemini"):
+                for k in ("clock", "weather", "gemini", "claude"):
                     if k in patch["enabled_cards"]:
                         self.config["enabled_cards"][k] = bool(patch["enabled_cards"][k])
                 if not any(self.config["enabled_cards"].values()):
                     self.config["enabled_cards"]["clock"] = True
 
             if "sprites" in patch and isinstance(patch["sprites"], dict):
-                for k in ("clock_day", "clock_night", "clock", "gemini", "spotify", "weather"):
+                for k in ("clock_day", "clock_night", "clock", "gemini", "claude", "spotify", "weather"):
                     if k in patch["sprites"]:
                         self.config["sprites"][k] = str(patch["sprites"][k]).strip().lower()
                 re_render_all = True
                 sync_offline = True
 
-            for key in ("rotate_interval", "brightness", "rotation", "night_start", "night_end", "night_brightness", "desktop_notify_ttl"):
+            for key in ("rotate_interval", "brightness", "rotation", "night_start", "night_end", "night_brightness", "desktop_notify_ttl", "gemini_daily_limit", "claude_daily_limit"):
                 if key in patch:
                     val_int = int(patch[key])
                     if key == "desktop_notify_ttl":
@@ -825,9 +1125,17 @@ class PokeHubEngine:
                         val_int = max(0, min(100, val_int))
                     elif key in ("night_start", "night_end"):
                         val_int = val_int % 24
+                    elif key in ("gemini_daily_limit", "claude_daily_limit"):
+                        val_int = max(0, val_int)
                     self.config[key] = val_int
                     if key == "rotation":
                         new_rot = val_int
+                    if key == "gemini_daily_limit":
+                        refresh_gemini = True
+                        self._invalidate_cards_locked("gemini")
+                    if key == "claude_daily_limit":
+                        refresh_claude = True
+                        self._invalidate_cards_locked("claude")
                     if key in ("night_start", "night_end") and self.config.get("auto_night_palette"):
                         re_render_all = True
                         sync_offline = True
@@ -926,6 +1234,10 @@ class PokeHubEngine:
             self._sync_offline_config()
         if re_render_weather:
             self._refresh_weather()
+        if refresh_gemini:
+            self._refresh_gemini()
+        if refresh_claude:
+            self._refresh_claude()
         if re_render_all:
             with self._lock:
                 self._invalidate_cards_locked()
@@ -934,6 +1246,8 @@ class PokeHubEngine:
                 snap = self._snapshot_for_render_locked(active)
             if snap is not None:
                 self._render_and_store(active, snap)
+            self._push_now(force=True, manual=True)
+        elif refresh_gemini or refresh_claude:
             self._push_now(force=True, manual=True)
         self._wake.set()
         return self.get_status()
@@ -1006,6 +1320,7 @@ class PokeHubEngine:
 
     def refresh_all_data(self) -> None:
         self._refresh_gemini()
+        self._refresh_claude()
         self._refresh_weather()
         if self._start_watchers:
             track = query_spotify_playing()
@@ -1063,6 +1378,8 @@ class PokeHubEngine:
                 "spotify": copy.deepcopy(self.spotify_track),
                 "gemini_today": (self.gemini_stats or {}).get("today_total", 0),
                 "gemini_week": (self.gemini_stats or {}).get("week_total", 0),
+                "claude_today": (self.claude_stats or {}).get("today_total", 0),
+                "claude_week": (self.claude_stats or {}).get("week_total", 0),
                 "weather": {
                     "city": (self.weather_data or {}).get("city", self.config["city"]),
                     "temp": (self.weather_data or {}).get("temp"),
@@ -1129,7 +1446,7 @@ class PokeHubEngine:
             return "spotify", "spotify"
 
         # 4. Auto-rotation managed by PC
-        enabled = [c for c in ("clock", "weather", "gemini") if self.config["enabled_cards"].get(c, True)]
+        enabled = [c for c in ("clock", "weather", "gemini", "claude") if self.config["enabled_cards"].get(c, True)]
         if self.spotify_track and not self.config.get("spotify_priority", True):
             enabled.append("spotify")
         if not enabled:
@@ -1156,14 +1473,14 @@ class PokeHubEngine:
         return 0.35 if card == "spotify" else 0.65
 
     def _invalidate_cards_locked(self, *cards: str) -> None:
-        targets = cards or ("clock", "weather", "gemini", "spotify", "notify")
+        targets = cards or ("clock", "weather", "gemini", "claude", "spotify", "notify")
         for c in targets:
             self._jpg_cache.pop(c, None)
             self._anim_cache.pop(c, None)
             self._card_gen[c] = self._card_gen.get(c, 0) + 1
 
     def _snapshot_for_render_locked(self, card: str) -> dict | None:
-        if card not in ("clock", "weather", "gemini", "spotify", "notify"):
+        if card not in ("clock", "weather", "gemini", "claude", "spotify", "notify"):
             return None
         if card == "spotify" and not self.spotify_track:
             return None
@@ -1187,6 +1504,7 @@ class PokeHubEngine:
             "count": count,
             "weather_data": copy.deepcopy(self.weather_data),
             "gemini_stats": copy.deepcopy(self.gemini_stats),
+            "claude_stats": copy.deepcopy(self.claude_stats),
             "spotify_track": copy.deepcopy(self.spotify_track),
             "notify_state": copy.deepcopy(self.notify_state),
         }
@@ -1228,6 +1546,21 @@ class PokeHubEngine:
                 else:
                     g["out_of_tokens"] = False
             return build_gemini_svg(g, cfg, anim_frame=anim_frame, now=now)
+        if card == "claude":
+            c = snapshot["claude_stats"]
+            if c is None:
+                c = collect_claude_usage()
+                snapshot["claude_stats"] = c
+            # Ensure out_of_tokens flag is present
+            if "out_of_tokens" not in c:
+                daily_limit = int(cfg.get("claude_daily_limit", 0))
+                if daily_limit > 0 and c["today_total"] >= daily_limit:
+                    c["out_of_tokens"] = True
+                elif c.get("quota_error"):
+                    c["out_of_tokens"] = True
+                else:
+                    c["out_of_tokens"] = False
+            return build_claude_svg(c, cfg, anim_frame=anim_frame, now=now)
         if card == "spotify" and snapshot["spotify_track"]:
             return build_spotify_svg(snapshot["spotify_track"], cfg, anim_frame=anim_frame, now=now)
         if card == "notify" and snapshot["notify_state"]:
@@ -1243,7 +1576,7 @@ class PokeHubEngine:
             )
         return None
 
-    def _render_card_unlocked(self, card_id: str, snapshot: dict) -> tuple[list[dict], dict | None] | None:
+    def _render_card_unlocked(self, card_id: str, snapshot: dict) -> tuple[list[dict], dict | None, dict | None] | None:
         """Build SVGs and render full+strip JPEGs strictly outside self._lock."""
         count = int(snapshot["count"])
         bg_hex = str(snapshot["bg_hex"])
@@ -1276,16 +1609,18 @@ class PokeHubEngine:
                 "strip_hash": _sha256(strip_jpg),
                 "strip": strip_jpg,
             })
-        return frames, snapshot.get("gemini_stats")
+        return frames, snapshot.get("gemini_stats"), snapshot.get("claude_stats")
 
     def _render_and_store(self, card: str, snapshot: dict) -> tuple[str, bytes] | None:
         result = self._render_card_unlocked(card, snapshot)
         if result is None:
             return None
-        frames, computed_gemini = result
+        frames, computed_gemini, computed_claude = result
         with self._lock:
             if card == "gemini" and self.gemini_stats is None and computed_gemini is not None:
                 self.gemini_stats = computed_gemini
+            if card == "claude" and self.claude_stats is None and computed_claude is not None:
+                self.claude_stats = computed_claude
             if self._card_gen.get(card, 0) != snapshot["gen"]:
                 return None
             self._anim_cache[card] = frames
@@ -1323,8 +1658,15 @@ class PokeHubEngine:
             changed = (
                 old is None
                 or old["today_total"] != stats["today_total"]
+                or old["today_in"] != stats["today_in"]
+                or old["today_out"] != stats["today_out"]
+                or old["today_cache"] != stats["today_cache"]
                 or old["today_steps"] != stats["today_steps"]
                 or old["today_date"] != stats["today_date"]
+                or old["week_total"] != stats["week_total"]
+                or old.get("daily_reset") != stats.get("daily_reset")
+                or old.get("weekly_reset") != stats.get("weekly_reset")
+                or old.get("updated_hm") != stats.get("updated_hm")
                 or old.get("out_of_tokens") != stats.get("out_of_tokens")
                 or old.get("quota_error") != stats.get("quota_error")
             )
@@ -1334,6 +1676,43 @@ class PokeHubEngine:
                 snap = self._snapshot_for_render_locked("gemini")
         if snap is not None:
             self._render_and_store("gemini", snap)
+
+    def _refresh_claude(self) -> None:
+        stats = collect_claude_usage()
+        # Compute out_of_tokens: quota error OR daily limit exceeded
+        daily_limit = int(self.config.get("claude_daily_limit", 0))
+        if daily_limit > 0 and stats["today_total"] >= daily_limit:
+            stats["out_of_tokens"] = True
+        elif stats.get("quota_error"):
+            stats["out_of_tokens"] = True
+        else:
+            stats["out_of_tokens"] = False
+        snap = None
+        with self._lock:
+            old = self.claude_stats
+            self.claude_stats = stats
+            self._last_claude_ts = time.monotonic()
+            changed = (
+                old is None
+                or old["today_total"] != stats["today_total"]
+                or old["today_in"] != stats["today_in"]
+                or old["today_out"] != stats["today_out"]
+                or old["today_cache"] != stats["today_cache"]
+                or old["today_steps"] != stats["today_steps"]
+                or old["today_date"] != stats["today_date"]
+                or old["week_total"] != stats["week_total"]
+                or old.get("daily_reset") != stats.get("daily_reset")
+                or old.get("weekly_reset") != stats.get("weekly_reset")
+                or old.get("updated_hm") != stats.get("updated_hm")
+                or old.get("out_of_tokens") != stats.get("out_of_tokens")
+                or old.get("quota_error") != stats.get("quota_error")
+            )
+            if changed:
+                self._invalidate_cards_locked("claude")
+            if (changed or "claude" not in self._jpg_cache) and self.active_card == "claude":
+                snap = self._snapshot_for_render_locked("claude")
+        if snap is not None:
+            self._render_and_store("claude", snap)
 
     def _refresh_weather(self) -> dict | None:
         with self._lock:
@@ -1485,6 +1864,8 @@ class PokeHubEngine:
         if not self._stop.is_set():
             self._refresh_gemini()
         if not self._stop.is_set():
+            self._refresh_claude()
+        if not self._stop.is_set():
             w = self._refresh_weather()
             if not w:
                 self._sync_offline_config(include_weather=False)
@@ -1553,6 +1934,8 @@ class PokeHubEngine:
 
                 if cur_hm != self._last_clock_hm:
                     self._last_clock_hm = cur_hm
+                    self._last_gemini_ts = 0.0
+                    self._last_claude_ts = 0.0
                     self._invalidate_cards_locked("clock")
                     if self.active_card == "clock" and self.config["enabled_cards"].get("clock", True):
                         snap_clock = self._snapshot_for_render_locked("clock")
@@ -1567,6 +1950,10 @@ class PokeHubEngine:
             # 2. Gemini check every 8s (incremental stat-cached scan)
             if (now_mono - self._last_gemini_ts) >= 8.0:
                 self._refresh_gemini()
+
+            # 2b. Claude check every 8s (incremental stat-cached scan)
+            if (now_mono - self._last_claude_ts) >= 8.0:
+                self._refresh_claude()
 
             # 3. Weather check — use backoff on failures, 15 min on success
             with self._lock:

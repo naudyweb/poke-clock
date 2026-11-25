@@ -5,6 +5,7 @@ poke-ctl: Instant CLI controller for Poké-Hub (http://127.0.0.1:8765).
 Examples:
   poke-ctl status
   poke-ctl show gemini
+  poke-ctl show claude
   poke-ctl show clock
   poke-ctl auto
   poke-ctl notify "BUILD OK" "Tests 100% verdes" --pokemon pikachu --ttl 12
@@ -50,10 +51,10 @@ def main() -> int:
 
     sub.add_parser("status", help="Show live status")
     sub.add_parser("auto", help="Resume automatic rotation")
-    sub.add_parser("refresh", help="Refresh Gemini, Weather, and Spotify data")
+    sub.add_parser("refresh", help="Refresh Gemini, Claude, Weather, and Spotify data")
 
     p_show = sub.add_parser("show", help="Immediately show and pin a screen")
-    p_show.add_argument("card", choices=["clock", "weather", "gemini", "spotify"])
+    p_show.add_argument("card", choices=["clock", "weather", "gemini", "claude", "spotify"])
 
     p_not = sub.add_parser("notify", help="Display a temporary Pokémon alert")
     p_not.add_argument("title", help="Alert title")
@@ -68,14 +69,14 @@ def main() -> int:
     p_rot.add_argument("val", type=int, choices=[0, 1, 2, 3])
 
     p_tog = sub.add_parser("toggle", help="Enable/disable a card, spotify_priority, or animations")
-    p_tog.add_argument("target", choices=["clock", "weather", "gemini", "spotify_priority", "animations"])
+    p_tog.add_argument("target", choices=["clock", "weather", "gemini", "claude", "spotify_priority", "animations"])
     p_tog.add_argument("state", choices=["on", "off"])
 
     p_pal = sub.add_parser("palette", help="Switch Pokémon retro color palette")
     p_pal.add_argument("name", choices=["gbc_classic", "gbc_dark", "gb_green", "pokedex_red"])
 
     p_sp = sub.add_parser("sprite", help="Change Pokémon sprite for a screen")
-    p_sp.add_argument("screen", choices=["clock_day", "clock_night", "weather", "gemini", "spotify"])
+    p_sp.add_argument("screen", choices=["clock_day", "clock_night", "weather", "gemini", "claude", "spotify"])
     p_sp.add_argument("pokemon", choices=["auto", "pikachu", "charmander", "squirtle", "bulbasaur", "gengar", "snorlax", "jigglypuff"])
 
     args = parser.parse_args()

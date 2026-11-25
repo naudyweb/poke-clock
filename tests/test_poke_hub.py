@@ -12,7 +12,7 @@ import time
 import unittest
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -34,6 +34,7 @@ from hub.server import make_handler
 from hub.state_engine import (
     DEFAULT_CONFIG,
     PokeHubEngine,
+    collect_claude_usage,
     collect_gemini_usage,
     render_svg_to_full_and_strip,
     render_svg_to_jpg_bytes,
@@ -601,6 +602,252 @@ class TestPokeHub(unittest.TestCase):
         self.assertEqual(self.engine._last_weather_ts, 0.0)
         # weather_data still None — the loop will pick up the retry on next iteration
         self.assertIsNone(self.engine.weather_data)
+
+    def test_gemini_quota_error_ignores_normal_records_and_recovers(self) -> None:
+        log_dir = Path(self.tmp.name) / "conv-quota-test" / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        transcript = log_dir / "transcript.jsonl"
+        glob_pattern = str(Path(self.tmp.name) / "*" / ".system_generated" / "logs" / "transcript.jsonl")
+
+        now_dt = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+
+        def run_collect(at_dt: datetime) -> dict:
+            with state_engine._GEMINI_CACHE_LOCK:
+                state_engine._GEMINI_FILE_CACHE.clear()
+            with mock.patch.object(state_engine, "TRANSCRIPT_GLOBS", [glob_pattern]), mock.patch(
+                "hub.state_engine.datetime"
+            ) as mock_dt, mock.patch("hub.state_engine.time.time", return_value=at_dt.timestamp()):
+                mock_dt.now.return_value = at_dt
+                mock_dt.fromisoformat.side_effect = datetime.fromisoformat
+                mock_dt.fromtimestamp.side_effect = datetime.fromtimestamp
+                mock_dt.combine.side_effect = datetime.combine
+                mock_dt.min = datetime.min
+                return collect_gemini_usage()
+
+        # 1. Normal DONE records mentioning quota/429/out of tokens must NOT trigger quota_error
+        transcript.write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "step_index": 1,
+                    "input_tokens": 100,
+                    "output_tokens": 25,
+                    "cache_read_tokens": 50,
+                    "thinking": "Analyzing 429 quota error handling when out of tokens",
+                    "content": "Fixed quota 429 limit exceeded message",
+                    "created_at": now_dt.isoformat(),
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        res_normal = run_collect(now_dt)
+        self.assertFalse(res_normal["quota_error"])
+
+        # 2. Actual ERROR record with cooldown activates quota_error and sets daily_reset from cooldown
+        err_dt = now_dt - timedelta(minutes=10)
+        transcript.write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "SYSTEM_MESSAGE",
+                    "status": "ERROR",
+                    "content": "Quota exceeded. Your quota will reset after 30m.",
+                    "created_at": err_dt.isoformat(),
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        res_err = run_collect(now_dt)
+        self.assertTrue(res_err["quota_error"])
+        self.assertEqual(res_err["daily_reset"], "00:20")
+
+        # 3. Once cooldown wait expires (now >= reset_at), quota_error clears automatically
+        after_wait = err_dt + timedelta(minutes=31)
+        res_after_wait = run_collect(after_wait)
+        self.assertFalse(res_after_wait["quota_error"])
+
+        # 4. Yesterday's quota error without explicit duration does not carry over to today
+        yesterday_dt = now_dt - timedelta(days=1)
+        transcript.write_text(
+            json.dumps({
+                "type": "SYSTEM_MESSAGE",
+                "status": "ERROR",
+                "content": "HTTP 429 quota exceeded",
+                "created_at": yesterday_dt.isoformat(),
+            }) + "\n",
+            encoding="utf-8",
+        )
+        res_yesterday = run_collect(now_dt)
+        self.assertFalse(res_yesterday["quota_error"])
+
+        # 5. A subsequent successful token step clears an earlier same-day quota error
+        transcript.write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "SYSTEM_MESSAGE",
+                    "status": "ERROR",
+                    "content": "HTTP 429 quota exceeded",
+                    "created_at": (now_dt - timedelta(minutes=5)).isoformat(),
+                }),
+                json.dumps({
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "step_index": 2,
+                    "input_tokens": 50,
+                    "output_tokens": 10,
+                    "cache_read_tokens": 0,
+                    "created_at": now_dt.isoformat(),
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        res_recovered = run_collect(now_dt)
+        self.assertFalse(res_recovered["quota_error"])
+
+    def test_refresh_gemini_invalidates_and_pushes_on_reset_or_quota_change(self) -> None:
+        base_stats = {
+            "today_date": "2026-11-24",
+            "updated_hm": "12:00",
+            "today_total": 500,
+            "today_in": 300,
+            "today_out": 50,
+            "today_cache": 150,
+            "today_steps": 3,
+            "today_sessions": 1,
+            "cache_pct": 33,
+            "week_total": 500,
+            "quota_error": True,
+            "daily_reset": "00:05",
+            "weekly_reset": "5d12h",
+            "week_days": [
+                {"date": "2026-11-24", "label": "M", "total": 500, "is_today": True},
+            ],
+        }
+        updated_countdown = dict(base_stats, updated_hm="12:04", daily_reset="00:01")
+        recovered_stats = dict(base_stats, updated_hm="12:05", quota_error=False, daily_reset="11:55")
+
+        self.engine.show_card("gemini")
+        initial_pushes = len(self.driver.pushes)
+
+        with mock.patch("hub.state_engine.collect_gemini_usage", return_value=dict(base_stats)):
+            self.engine._refresh_gemini()
+        self.engine._push_now(force=False)
+        after_first = len(self.driver.pushes)
+        self.assertGreater(after_first, initial_pushes)
+
+        # Changing only daily_reset / updated_hm (today_total unchanged) must invalidate and push
+        with mock.patch("hub.state_engine.collect_gemini_usage", return_value=dict(updated_countdown)):
+            self.engine._refresh_gemini()
+        self.engine._push_now(force=False)
+        after_countdown = len(self.driver.pushes)
+        self.assertGreater(after_countdown, after_first)
+
+        # Recovering from quota_error (out_of_tokens True -> False) must invalidate and push
+        with mock.patch("hub.state_engine.collect_gemini_usage", return_value=dict(recovered_stats)):
+            self.engine._refresh_gemini()
+        self.engine._push_now(force=False)
+        self.assertGreater(len(self.driver.pushes), after_countdown)
+        self.assertFalse(self.engine.gemini_stats["out_of_tokens"])
+
+    def test_claude_card_end_to_end_usage_and_ui_controls(self) -> None:
+        # 1. collect_claude_usage must not double-count cache tokens or flag hasUnknownModelCost as quota_error
+        proj_dir = Path(self.tmp.name) / "claude-proj"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        session_file = proj_dir / "session.jsonl"
+        now_ms = int(time.time() * 1000)
+        session_file.write_text(
+            json.dumps({
+                "type": "cost-state",
+                "sessionId": "s1",
+                "startTime": now_ms,
+                "hasUnknownModelCost": True,
+                "modelUsage": {
+                    "claude-sonnet": {
+                        "inputTokens": 100,
+                        "outputTokens": 50,
+                        "thinkingTokens": 25,
+                        "cacheReadInputTokens": 200,
+                        "cacheCreationInputTokens": 50,
+                    }
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        claude_glob = str(Path(self.tmp.name) / "**" / "*.jsonl")
+        with state_engine._CLAUDE_CACHE_LOCK:
+            state_engine._CLAUDE_FILE_CACHE.clear()
+        with mock.patch.object(state_engine, "CLAUDE_PROJECT_GLOB", claude_glob):
+            c_stats = collect_claude_usage()
+        self.assertEqual(c_stats["today_in"], 100)
+        self.assertEqual(c_stats["today_out"], 75)
+        self.assertEqual(c_stats["today_cache"], 250)
+        self.assertEqual(c_stats["today_total"], 425)
+        self.assertFalse(c_stats["quota_error"])
+
+        # 2. Sprite config persists for claude and REST /api/show + /api/preview/claude work
+        self.engine.update_config({"sprites": {"claude": "gengar"}})
+        self.assertEqual(self.engine.config["sprites"]["claude"], "gengar")
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.engine))
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/show",
+                data=json.dumps({"card": "claude"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(json.loads(resp.read())["card"], "claude")
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/preview/claude", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertTrue(resp.read().startswith(b"\xff\xd8\xff"))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+        # 3. Web UI contains Claude button, rotation switch, and sprite selector
+        ui_html = (ROOT / "hub" / "ui.html").read_text(encoding="utf-8")
+        self.assertIn('id="btn-claude"', ui_html)
+        self.assertIn("showCard('claude')", ui_html)
+        self.assertIn('id="en-claude"', ui_html)
+        self.assertIn('id="sp-claude"', ui_html)
+
+    def test_daily_limits_disabled_by_default_and_do_not_lock_screen(self) -> None:
+        self.assertEqual(DEFAULT_CONFIG["gemini_daily_limit"], 0)
+        self.assertEqual(DEFAULT_CONFIG["claude_daily_limit"], 0)
+
+        high_stats = {
+            "today_date": "2026-11-24",
+            "updated_hm": "10:45",
+            "today_total": 45_000_000,
+            "today_in": 5_000_000,
+            "today_out": 1_000_000,
+            "today_cache": 39_000_000,
+            "today_steps": 400,
+            "today_sessions": 20,
+            "cache_pct": 89,
+            "week_total": 130_000_000,
+            "quota_error": False,
+            "daily_reset": "13:15",
+            "weekly_reset": "5d13h",
+            "week_days": [
+                {"date": "2026-11-24", "label": "M", "total": 45_000_000, "is_today": True},
+            ],
+        }
+        with mock.patch("hub.state_engine.collect_gemini_usage", return_value=dict(high_stats)):
+            self.engine._refresh_gemini()
+            self.assertFalse(self.engine.gemini_stats["out_of_tokens"])
+
+            # Explicit positive limit sets out_of_tokens, resetting to 0 clears it immediately
+            self.engine.update_config({"gemini_daily_limit": 40_000_000})
+            self.assertTrue(self.engine.gemini_stats["out_of_tokens"])
+            self.engine.update_config({"gemini_daily_limit": 0})
+            self.assertFalse(self.engine.gemini_stats["out_of_tokens"])
 
 
 if __name__ == "__main__":
