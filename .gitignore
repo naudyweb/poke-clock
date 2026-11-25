@@ -16,10 +16,11 @@ backup-web/
 
 # Generated preview renders
 preview.jpg
-preview_pokemon.jpg
+preview_*.jpg
 previews/
 
 # OS / Editor
+.junie/
 .DS_Store
 *.swp
 *.swo
