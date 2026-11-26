@@ -10,6 +10,7 @@ Examples:
   poke-ctl auto
   poke-ctl notify "BUILD OK" "Tests 100% verdes" --pokemon pikachu --ttl 12
   poke-ctl brightness 80
+  poke-ctl display on
   poke-ctl rotation 2
   poke-ctl toggle weather off
 """
@@ -65,6 +66,9 @@ def main() -> int:
     p_br = sub.add_parser("brightness", help="Set display brightness (0..100)")
     p_br.add_argument("level", type=int)
 
+    p_display = sub.add_parser("display", help="Turn the physical display on or off")
+    p_display.add_argument("state", choices=["on", "off"])
+
     p_rot = sub.add_parser("rotation", help="Set display rotation (0..3)")
     p_rot.add_argument("val", type=int, choices=[0, 1, 2, 3])
 
@@ -99,6 +103,8 @@ def main() -> int:
         }), ensure_ascii=False))
     elif args.cmd == "brightness":
         print(json.dumps(call_api("POST", "/api/brightness", {"val": args.level}), ensure_ascii=False))
+    elif args.cmd == "display":
+        print(json.dumps(call_api("POST", "/api/display", {"on": args.state == "on"}), ensure_ascii=False))
     elif args.cmd == "rotation":
         print(json.dumps(call_api("POST", "/api/rotation", {"val": args.val}), ensure_ascii=False))
     elif args.cmd == "toggle":

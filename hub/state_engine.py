@@ -25,6 +25,7 @@ from pathlib import Path
 from drivers.base import DisplayDriver
 from drivers.raw_frame_driver import RawFrameDriver
 from drivers.stock_driver import StockFirmwareDriver
+from hub.claude_usage import CLAUDE_USAGE_PATH as CLAUDE_RATE_LIMITS_PATH, read_claude_usage
 from hub.desktop_notify_watcher import VALID_POKEMON, DesktopNotifyWatcher
 from hub.render_engine import BACKEND_NAME, render_svg_to_full_and_strip, render_svg_to_jpg
 from hub.spotify_watcher import SpotifyWatcher, query_spotify_playing
@@ -545,8 +546,6 @@ def collect_claude_usage() -> dict:
     daily_total: dict = defaultdict(int)
     today_in = today_out = today_cache = today_steps = 0
     today_sessions: set[str] = set()
-    any_quota_error = False
-
     files: set[str] = set()
     for path in glob.glob(CLAUDE_PROJECT_GLOB, recursive=True):
         rp = os.path.realpath(path)
@@ -628,29 +627,12 @@ def collect_claude_usage() -> dict:
     denom = today_in + today_cache
     cache_pct = int(round((today_cache / denom) * 100)) if denom > 0 else 0
 
-    # Daily reset: next midnight
-    tomorrow = today + timedelta(days=1)
-    midnight_tomorrow = datetime.combine(tomorrow, datetime.min.time(), tzinfo=local_tz)
-    daily_reset_delta = midnight_tomorrow - local_now
-    daily_reset_h = int(daily_reset_delta.total_seconds() // 3600)
-    daily_reset_m = int((daily_reset_delta.total_seconds() % 3600) // 60)
-    daily_reset_str = f"{daily_reset_h:02d}:{daily_reset_m:02d}"
-
-    # Weekly reset: next Monday midnight
-    days_until_monday = (7 - local_now.weekday()) % 7
-    if days_until_monday == 0:
-        days_until_monday = 7
-    next_monday = today + timedelta(days=days_until_monday)
-    midnight_monday = datetime.combine(next_monday, datetime.min.time(), tzinfo=local_tz)
-    weekly_reset_delta = midnight_monday - local_now
-    weekly_reset_total_h = int(weekly_reset_delta.total_seconds() // 3600)
-    weekly_reset_m = int((weekly_reset_delta.total_seconds() % 3600) // 60)
-    if weekly_reset_total_h >= 24:
-        w_days = weekly_reset_total_h // 24
-        w_hours = weekly_reset_total_h % 24
-        weekly_reset_str = f"{w_days}d{w_hours:02d}h"
-    else:
-        weekly_reset_str = f"{weekly_reset_total_h:02d}:{weekly_reset_m:02d}"
+    quota = read_claude_usage(path=CLAUDE_RATE_LIMITS_PATH)
+    rate_limits = quota["rate_limits"]
+    quota_exhausted = any(
+        window["used_percentage"] >= 100
+        for window in rate_limits.values()
+    )
 
     return {
         "today_date": today.isoformat(),
@@ -663,9 +645,11 @@ def collect_claude_usage() -> dict:
         "today_sessions": len(today_sessions),
         "cache_pct": cache_pct,
         "week_total": week_total,
-        "quota_error": any_quota_error,
-        "daily_reset": daily_reset_str,
-        "weekly_reset": weekly_reset_str,
+        "quota_error": quota_exhausted,
+        "out_of_tokens": quota_exhausted,
+        "quota_source": quota["source"],
+        "quota_updated_at": quota["updated_at"],
+        "rate_limits": rate_limits,
         "week_days": [
             {
                 "date": d.isoformat(),
@@ -707,6 +691,7 @@ class PokeHubEngine:
         self.config_path = config_path
         self.config = self._load_config()
         self._lock = threading.RLock()
+        self._display_power_lock = threading.Lock()
         self._save_lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -733,6 +718,7 @@ class PokeHubEngine:
         self._last_claude_ts: float = 0.0
         self._last_clock_hm: str = ""
         self._last_device_status: dict = {}
+        self._display_on = True
         self._last_night_state: bool | None = None
 
         # Notification FIFO queue & history
@@ -858,10 +844,11 @@ class PokeHubEngine:
 
         with self._lock:
             drv = self.driver
-            ext_drv = self._external_driver
+        try:
+            self.set_display_power(False)
+        except Exception:
+            pass
         if isinstance(drv, RawFrameDriver):
-            if not ext_drv:
-                drv.enter_standby()
             drv._close_conn()
 
     # ============================================================
@@ -1090,6 +1077,41 @@ class PokeHubEngine:
         self._apply_effective_brightness()
         self._wake.set()
         return self.get_status()
+
+    def set_display_power(self, on: bool) -> dict:
+        """Control the physical display while leaving the Wi-Fi device online."""
+        with self._display_power_lock:
+            with self._lock:
+                driver = self.driver
+                previous = self._display_on
+                self._display_on = on
+
+            if not driver.set_display_power(on):
+                with self._lock:
+                    self._display_on = previous
+                error = getattr(driver, "last_error", "")
+                if not error and not driver.supports_display_power:
+                    error = "display power control is not supported by this firmware"
+                return {
+                    "ok": False,
+                    "display_on": previous,
+                    "error": error or "could not change display power",
+                }
+
+            with self._lock:
+                if on:
+                    self._last_base_key = ("", "")
+                    self._last_active_frame_hash = ""
+                    self._offline_failures = 0
+                    self._next_push_retry_mono = 0.0
+
+            if on:
+                self._push_now(force=True)
+            self._wake.set()
+
+            status = self.get_status()
+            status.update({"ok": True, "display_on": on})
+            return status
 
     def update_config(self, patch: dict) -> dict:
         re_render_weather = False
@@ -1380,6 +1402,11 @@ class PokeHubEngine:
                 "gemini_week": (self.gemini_stats or {}).get("week_total", 0),
                 "claude_today": (self.claude_stats or {}).get("today_total", 0),
                 "claude_week": (self.claude_stats or {}).get("week_total", 0),
+                "claude_quota": {
+                    "source": (self.claude_stats or {}).get("quota_source"),
+                    "updated_at": (self.claude_stats or {}).get("quota_updated_at"),
+                    "rate_limits": copy.deepcopy((self.claude_stats or {}).get("rate_limits", {})),
+                },
                 "weather": {
                     "city": (self.weather_data or {}).get("city", self.config["city"]),
                     "temp": (self.weather_data or {}).get("temp"),
@@ -1392,6 +1419,8 @@ class PokeHubEngine:
                 "frame_seq": self._frame_seq,
                 "config": copy.deepcopy(self.config),
                 "device": dict(self._last_device_status),
+                "display_on": self._display_on,
+                "display_power_supported": self.driver.supports_display_power,
             }
         if watcher is not None:
             desktop_status = watcher.get_status()
@@ -1679,14 +1708,6 @@ class PokeHubEngine:
 
     def _refresh_claude(self) -> None:
         stats = collect_claude_usage()
-        # Compute out_of_tokens: quota error OR daily limit exceeded
-        daily_limit = int(self.config.get("claude_daily_limit", 0))
-        if daily_limit > 0 and stats["today_total"] >= daily_limit:
-            stats["out_of_tokens"] = True
-        elif stats.get("quota_error"):
-            stats["out_of_tokens"] = True
-        else:
-            stats["out_of_tokens"] = False
         snap = None
         with self._lock:
             old = self.claude_stats
@@ -1694,16 +1715,9 @@ class PokeHubEngine:
             self._last_claude_ts = time.monotonic()
             changed = (
                 old is None
-                or old["today_total"] != stats["today_total"]
-                or old["today_in"] != stats["today_in"]
-                or old["today_out"] != stats["today_out"]
-                or old["today_cache"] != stats["today_cache"]
-                or old["today_steps"] != stats["today_steps"]
-                or old["today_date"] != stats["today_date"]
-                or old["week_total"] != stats["week_total"]
-                or old.get("daily_reset") != stats.get("daily_reset")
-                or old.get("weekly_reset") != stats.get("weekly_reset")
-                or old.get("updated_hm") != stats.get("updated_hm")
+                or old.get("rate_limits") != stats.get("rate_limits")
+                or old.get("quota_source") != stats.get("quota_source")
+                or old.get("quota_updated_at") != stats.get("quota_updated_at")
                 or old.get("out_of_tokens") != stats.get("out_of_tokens")
                 or old.get("quota_error") != stats.get("quota_error")
             )
@@ -1744,6 +1758,8 @@ class PokeHubEngine:
 
         for _ in range(2):
             with self._lock:
+                if not self._display_on:
+                    return {"ok": True, "display_on": False, "skipped": True}
                 if reset_backoff:
                     self._offline_failures = 0
                     self._next_push_retry_mono = 0.0
@@ -1972,15 +1988,25 @@ class PokeHubEngine:
                     drv = self.driver
                     host = str(self.config["host"])
                     ext_drv = self._external_driver
-                st = drv.get_status()
-                with self._lock:
-                    self._last_device_status = st
-                    if st.get("online"):
-                        self._offline_failures = 0
-                        self._next_push_retry_mono = 0.0
-                        # If weather data is missing, force a retry now that we're online
-                        if self.weather_data is None:
-                            self._last_weather_ts = 0.0
+                display_woke = False
+                with self._display_power_lock:
+                    st = drv.get_status()
+                    with self._lock:
+                        self._last_device_status = st
+                        reported_display_on = st.get("display_on")
+                        if isinstance(reported_display_on, bool):
+                            display_woke = reported_display_on and not self._display_on
+                            self._display_on = reported_display_on
+                            if display_woke:
+                                self._last_base_key = ("", "")
+                        if st.get("online"):
+                            self._offline_failures = 0
+                            self._next_push_retry_mono = 0.0
+                            # If weather data is missing, force a retry now that we're online
+                            if self.weather_data is None:
+                                self._last_weather_ts = 0.0
+                if display_woke:
+                    self._wake.set()
                 if not st.get("online"):
                     if not ext_drv:
                         new_drv = self._detect_driver(host)

@@ -20,6 +20,17 @@ class DisplayDriver(ABC):
         """Set screen rotation (0..3) if supported."""
         return False
 
+    @property
+    def supports_display_power(self) -> bool:
+        return False
+
+    def check_display_power_support(self) -> bool:
+        return self.supports_display_power
+
+    def set_display_power(self, on: bool) -> bool:
+        """Turn the physical display on or off without disconnecting the device."""
+        return False
+
     @abstractmethod
     def get_status(self) -> dict:
         """Query live hardware status."""

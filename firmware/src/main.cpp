@@ -1,11 +1,12 @@
 /**
- * PokeDisplay Thin RAM-Stream Firmware v1.4.0 for JUZIPi SD PRO (ESP8266 + ST7789 240x240)
+ * PokeDisplay Thin RAM-Stream Firmware v1.5.0 for JUZIPi SD PRO (ESP8266 + ST7789 240x240)
  *
  * Ultra-lean "Dumb Screen" receiver controlled by Poké-Hub on the PC, with autonomous
  * offline Pokémon GBC clock + OpenWeatherMap weather updates AND persistent EEPROM cache:
  *   - POST /frame          : Streams full 240x240 or partial (?x=&y=) baseline JPEG into static RAM
  *                            and blits to ST7789 via 40MHz SPI (ZERO flash wear!)
  *   - GET  /brightness     : ?val=0..100 (inverted PWM on GPIO5, debounced EEPROM persistence)
+ *   - GET  /display        : ?on=0|1 (ST7789 sleep while Wi-Fi remains active)
  *   - GET  /rotation       : ?val=0..3 (debounced EEPROM persistence)
  *   - GET|POST /offline_cfg: Syncs offline city/key/units/12h/trainer/poke/pal/wicon (+ weather snapshot)
  *                            from PC (wear-protected EEPROM persistence with hysteresis)
@@ -39,7 +40,7 @@
 #endif
 
 static const char* HOSTNAME      = "poke-display";
-static const char* FW_VERSION    = "1.4.0";
+static const char* FW_VERSION    = "1.5.0";
 static const long  TZ_OFFSET_SEC = -5 * 3600; // America/Lima (UTC-5)
 
 static constexpr size_t   MAX_FRAME_BYTES             = 24576;   // 24 KB static RAM buffer
@@ -124,6 +125,7 @@ ESP8266WebServer server(80);
 
 static uint8_t  currentBrightness      = 95;
 static uint8_t  currentRotation        = 0;
+static bool     displaySleeping        = false;
 static uint32_t frameCount             = 0;
 static uint32_t lastDecodeMs           = 0;
 static uint32_t bootMs                 = 0;
@@ -925,13 +927,34 @@ static void applyBrightness(uint8_t pct) {
     if (pct > 100) pct = 100;
     currentBrightness = pct;
     pinMode(TFT_BL, OUTPUT);
-    if (pct == 0) {
+    if (displaySleeping || pct == 0) {
         digitalWrite(TFT_BL, TFT_BACKLIGHT_ON == LOW ? HIGH : LOW);
         return;
     }
     analogWriteRange(100);
     int pwm = (TFT_BACKLIGHT_ON == LOW) ? (100 - pct) : pct;
     analogWrite(TFT_BL, pwm);
+}
+
+static void setDisplaySleeping(bool sleeping) {
+    if (displaySleeping == sleeping) return;
+
+    if (sleeping) {
+        tft.writecommand(0x28); // ST7789 display off
+        tft.writecommand(0x10); // ST7789 sleep in
+        displaySleeping = true;
+        applyBrightness(currentBrightness);
+        return;
+    }
+
+    tft.writecommand(0x11); // ST7789 sleep out
+    delay(120);
+    tft.writecommand(0x29); // ST7789 display on
+    displaySleeping = false;
+    applyBrightness(currentBrightness);
+    standbyActive = false;
+    standbyNeedsFullRedraw = true;
+    lastStandbyMin = -1;
 }
 
 static bool tftOutputCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
@@ -1200,6 +1223,7 @@ static void onWifiConnected(bool showReadySplash) {
     }
     wifiWasConnected = true;
     wifiDisconnectedSinceMs = 0;
+    WiFi.setSleepMode(displaySleeping ? WIFI_MODEM_SLEEP : WIFI_NONE_SLEEP);
     weatherFailCount = 0;
     MDNS.begin(HOSTNAME);
     configTime(TZ_OFFSET_SEC, 0, "pool.ntp.org", "time.nist.gov");
@@ -1209,7 +1233,7 @@ static void onWifiConnected(bool showReadySplash) {
     if (showReadySplash) {
         char ipBuf[16];
         ipToStr(WiFi.localIP(), ipBuf, sizeof(ipBuf));
-        drawSplash("READY v1.4!", ipBuf, "Waiting for PC");
+        drawSplash("READY v1.5!", ipBuf, "Waiting for PC");
     } else if (standbyActive || wasAp) {
         lastStandbyMin = -1;
         standbyNeedsFullRedraw = true;
@@ -1235,7 +1259,7 @@ static void handleRoot() {
         "a{display:inline-block;padding:10px 14px;background:#181820;color:#fff;text-decoration:none;margin:6px 6px 0 0;font-weight:bold;}"
         "a.hub{background:#24a848;display:block;text-align:center;margin-bottom:10px;}"
         "</style></head><body><div class='box'>"
-        "<h2>POKE-DISPLAY RAM v1.4</h2>"
+        "<h2>POKE-DISPLAY RAM v1.5</h2>"
         "<a class='hub' href='http://pokeclock.local/'>Abrir Panel Poké-Hub (PC)</a>"
     );
     html += F("<p>IP: ");
@@ -1282,7 +1306,7 @@ static void handleRoot() {
 
 static void handleStatus() {
     if (server.hasArg("keepalive")) {
-        if (!standbyActive && !forceStandbyNow) {
+        if (!displaySleeping && !standbyActive && !forceStandbyNow) {
             lastFrameMs = millis();
             pcContacted = true;
         }
@@ -1325,7 +1349,7 @@ static void handleStatus() {
         out, sizeof(out),
         PSTR("{\"device\":\"poke-display\",\"version\":\"%s\",\"partial_frame\":true,"
              "\"ip\":\"%s\",\"hub_ip\":\"%s\",\"wifi_connected\":%s,\"ap_fallback\":%s,"
-             "\"rssi\":%d,\"free_heap\":%u,\"brightness\":%u,\"rotation\":%u,"
+             "\"rssi\":%d,\"free_heap\":%u,\"brightness\":%u,\"rotation\":%u,\"display_on\":%s,"
              "\"frames\":%lu,\"last_ms\":%lu,\"standby\":%s,"
              "\"offline_city\":\"%s\",\"offline_weather_ok\":%s,"
              "\"offline_weather_cached\":%s,\"offline_weather_synced\":%s,"
@@ -1344,6 +1368,7 @@ static void handleStatus() {
         (unsigned)ESP.getFreeHeap(),
         (unsigned)currentBrightness,
         (unsigned)currentRotation,
+        displaySleeping ? "false" : "true",
         (unsigned long)frameCount,
         (unsigned long)lastDecodeMs,
         standbyActive ? "true" : "false",
@@ -1567,6 +1592,11 @@ static void handleStandby() {
 
 static void handleFrameUpload() {
     HTTPUpload& upload = server.upload();
+    if (displaySleeping) {
+        frameLen = 0;
+        frameOverflow = false;
+        return;
+    }
     if (upload.status == UPLOAD_FILE_START) {
         frameLen = 0;
         frameOverflow = false;
@@ -1582,6 +1612,10 @@ static void handleFrameUpload() {
 }
 
 static void handleFrameDone() {
+    if (displaySleeping) {
+        server.send(423, "application/json", "{\"ok\":false,\"error\":\"display is off\"}");
+        return;
+    }
     if (frameOverflow) {
         server.send(413, "application/json", "{\"ok\":false,\"error\":\"frame too large\"}");
         return;
@@ -1652,6 +1686,25 @@ static void handleBrightness() {
     char resp[48];
     snprintf_P(resp, sizeof(resp), PSTR("{\"ok\":true,\"brightness\":%u}"), (unsigned)currentBrightness);
     server.send(200, "application/json", resp);
+}
+
+static void handleDisplayPower() {
+    if (!server.hasArg("on")) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing on\"}");
+        return;
+    }
+    String value = server.arg("on");
+    if (value != "0" && value != "1") {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"on must be 0 or 1\"}");
+        return;
+    }
+
+    setDisplaySleeping(value == "0");
+    char resp[48];
+    snprintf_P(resp, sizeof(resp), PSTR("{\"ok\":true,\"display_on\":%s}"),
+               displaySleeping ? "false" : "true");
+    server.send(200, "application/json", resp);
+    WiFi.setSleepMode(displaySleeping ? WIFI_MODEM_SLEEP : WIFI_NONE_SLEEP);
 }
 
 static void handleRotation() {
@@ -1791,6 +1844,7 @@ void setup() {
     server.on("/standby", HTTP_POST, handleStandby);
     server.on("/frame", HTTP_POST, handleFrameDone, handleFrameUpload);
     server.on("/brightness", HTTP_GET, handleBrightness);
+    server.on("/display", HTTP_GET, handleDisplayPower);
     server.on("/rotation", HTTP_GET, handleRotation);
     server.on("/restart", HTTP_GET, handleRestart);
     server.on("/ota", HTTP_GET, handleOtaPage);
@@ -1832,6 +1886,11 @@ void loop() {
             lastWifiBeginMs = now;
             WiFi.begin(WIFI_SSID, WIFI_PASS);
         }
+    }
+
+    if (displaySleeping) {
+        delay(50);
+        return;
     }
 
     // 2. Autonomous OpenWeatherMap sync with staggered backoff (30s -> 60s -> 180s -> 900s).

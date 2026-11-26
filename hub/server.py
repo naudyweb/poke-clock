@@ -7,13 +7,16 @@ Runs on 0.0.0.0:8765 — 100% local PC control with instant screen pushing.
 from __future__ import annotations
 
 import argparse
+from html import escape
 import json
 import os
 import signal
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -21,10 +24,13 @@ if str(ROOT_DIR) not in sys.path:
 
 from hub.mdns_publisher import MdnsPublisher
 from hub.state_engine import PokeHubEngine
+from hub.yellow_duck import YellowDuckError, reply_to_yellow_duck
 
 UI_HTML_PATH = Path(__file__).resolve().parent / "ui.html"
 _UI_CACHE_LOCK = threading.Lock()
 _UI_CACHE: tuple[int, bytes] | None = None
+YELLOW_DUCK_RATE_LIMIT = 8
+YELLOW_DUCK_RATE_WINDOW_S = 60.0
 
 
 def _get_ui_html() -> bytes:
@@ -58,6 +64,9 @@ def _etag_matches(header_value: str, etag: str, etag_hash: str) -> bool:
 
 
 def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
+    yellow_duck_requests: dict[str, list[float]] = {}
+    yellow_duck_requests_lock = threading.Lock()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args) -> None:
             pass  # Keep journald clean
@@ -76,7 +85,72 @@ def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
             if length <= 0:
                 return {}
             raw = self.rfile.read(min(length, 65536))
+            if self.headers.get("Content-Type", "").startswith("application/x-www-form-urlencoded"):
+                return {
+                    key: values[-1]
+                    for key, values in parse_qs(raw.decode("utf-8"), keep_blank_values=True).items()
+                }
             return json.loads(raw.decode("utf-8"))
+
+        def _send_yellow_duck_fallback(
+            self,
+            messages: list,
+            error: str = "",
+            status_code: int = 200,
+        ) -> None:
+            visible_messages = [
+                item for item in messages[-12:]
+                if isinstance(item, dict)
+                and item.get("role") in ("user", "model")
+                and isinstance(item.get("text"), str)
+            ]
+            history = visible_messages[:-1] if error and visible_messages and visible_messages[-1]["role"] == "user" else visible_messages
+            retry_text = visible_messages[-1]["text"] if error and visible_messages and visible_messages[-1]["role"] == "user" else ""
+            transcript = "".join(
+                f"<article><strong>{'Tú' if item['role'] == 'user' else 'Psyduck'}</strong>"
+                f"<p>{escape(item['text'])}</p></article>"
+                for item in visible_messages
+            )
+            notice = f'<p role="status">{escape(error)}</p>' if error else ""
+            raw = f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Yellow Duck con Psyduck · Poké-Hub</title>
+<style>body{{max-width:44rem;margin:2rem auto;padding:0 1rem;color:#161a24;background:#edf0f5;font:16px/1.55 system-ui,sans-serif}}main{{padding:1.25rem;background:#fff;border:1px solid #d5d9e0;border-radius:12px}}article{{margin:1rem 0;padding:.75rem;background:#f5f7fb;border-radius:8px}}p{{white-space:pre-wrap;overflow-wrap:anywhere}}label,textarea{{display:block;width:100%}}textarea{{box-sizing:border-box;min-height:6rem;margin:.5rem 0 1rem;padding:.75rem;font:inherit}}button{{min-height:44px;padding:.6rem 1rem;color:#fff;background:#b82932;border:0;border-radius:8px;font:inherit}}a{{color:#225ad6}}</style></head>
+<body><main><h1>Yellow Duck con Psyduck</h1>{transcript}{notice}
+<form action="/api/yellow-duck" method="post">
+<input type="hidden" name="history" value="{escape(json.dumps(history, ensure_ascii=False), quote=True)}">
+<label for="yellow-duck-message">Cuéntale el siguiente paso a Psyduck</label>
+<textarea id="yellow-duck-message" name="message" maxlength="2000" required>{escape(retry_text)}</textarea>
+<button type="submit">Enviar a Psyduck</button></form><p><a href="/">Volver al panel</a></p></main></body></html>""".encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _is_same_origin(self) -> bool:
+            origin = self.headers.get("Origin", "") or self.headers.get("Referer", "")
+            host = self.headers.get("Host", "")
+            parsed = urlsplit(origin)
+            return bool(
+                parsed.scheme in ("http", "https")
+                and parsed.netloc.lower() == host.lower()
+            )
+
+        def _allow_yellow_duck_request(self) -> bool:
+            client = self.client_address[0]
+            now = time.monotonic()
+            with yellow_duck_requests_lock:
+                recent = [
+                    stamp for stamp in yellow_duck_requests.get(client, [])
+                    if now - stamp < YELLOW_DUCK_RATE_WINDOW_S
+                ]
+                if len(recent) >= YELLOW_DUCK_RATE_LIMIT:
+                    yellow_duck_requests[client] = recent
+                    return False
+                recent.append(now)
+                yellow_duck_requests[client] = recent
+                return True
 
         def do_OPTIONS(self) -> None:
             self.send_response(204)
@@ -137,9 +211,47 @@ def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
             except Exception as exc:
                 self._send_json(400, {"ok": False, "error": f"invalid json: {exc}"})
                 return
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "JSON body must be an object"})
+                return
+            form_submission = (
+                path == "/api/yellow-duck"
+                and self.headers.get("Content-Type", "").startswith("application/x-www-form-urlencoded")
+                and "text/html" in self.headers.get("Accept", "")
+            )
 
             try:
-                if path == "/api/show":
+                if path == "/api/yellow-duck":
+                    if not self._is_same_origin():
+                        self._send_json(403, {"ok": False, "error": "same-origin request required"})
+                    elif not self._allow_yellow_duck_request():
+                        self._send_json(429, {"ok": False, "error": "demasiados mensajes; espera un momento"})
+                    else:
+                        if form_submission:
+                            raw_history = body.get("history", "[]")
+                            try:
+                                messages = json.loads(raw_history) if isinstance(raw_history, str) else []
+                            except json.JSONDecodeError:
+                                messages = []
+                            if not isinstance(messages, list):
+                                messages = []
+                            messages = [*messages, {"role": "user", "text": body.get("message", "")}]
+                        else:
+                            messages = body.get("messages")
+                        try:
+                            reply = reply_to_yellow_duck(messages)
+                        except YellowDuckError as exc:
+                            if not form_submission:
+                                raise
+                            self._send_yellow_duck_fallback(messages, str(exc), exc.status_code)
+                        else:
+                            if form_submission:
+                                self._send_yellow_duck_fallback(
+                                    [*messages, {"role": "model", "text": reply}],
+                                )
+                            else:
+                                self._send_json(200, {"ok": True, "reply": reply})
+                elif path == "/api/show":
                     card = str(body.get("card") or "")
                     self._send_json(200, engine.show_card(card))
                 elif path == "/api/auto":
@@ -178,6 +290,13 @@ def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
                         self._send_json(200, engine.set_brightness(level))
                     else:
                         self._send_json(200, engine.update_config({"brightness": level}))
+                elif path == "/api/display":
+                    on = body.get("on")
+                    if not isinstance(on, bool):
+                        self._send_json(400, {"ok": False, "error": "on must be a boolean"})
+                        return
+                    result = engine.set_display_power(on)
+                    self._send_json(200 if result.get("ok") else 409, result)
                 elif path == "/api/rotation":
                     rot = int(body.get("val", 0))
                     self._send_json(200, engine.update_config({"rotation": rot}))
@@ -185,6 +304,8 @@ def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
                     self._send_json(404, {"ok": False, "error": "not found"})
             except ValueError as exc:
                 self._send_json(400, {"ok": False, "error": str(exc)})
+            except YellowDuckError as exc:
+                self._send_json(exc.status_code, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 self._send_json(500, {"ok": False, "error": str(exc)})
 

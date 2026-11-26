@@ -545,91 +545,80 @@ def build_gemini_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
 # 1b. CLAUDE CODE TOKENS (Gen-2 Battle HUD)
 # ============================================================
 def build_claude_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, now: datetime | None = None) -> str:
-    """Build a Claude Code token usage screen — same battle HUD style as Gemini."""
+    """Build a Claude Code rate-limit screen from official status-line data."""
     if now is None:
         now = datetime.now().astimezone()
     pal = resolve_palette(cfg, now)
     sprites = (cfg or {}).get("sprites") or {}
     sp_key, sp_grid, sp_pal, _ = _get_sprite(sprites.get("claude", "charmander"), "charmander")
+    rate_limits = stats.get("rate_limits") or {}
+    five_hour = rate_limits.get("five_hour")
+    seven_day = rate_limits.get("seven_day")
 
-    out_of_tokens = stats.get("out_of_tokens", False)
+    def usage_percent(window: dict | None) -> float | None:
+        value = window.get("used_percentage") if isinstance(window, dict) else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
+            return None
+        return float(value)
 
+    five_pct = usage_percent(five_hour)
+    seven_pct = usage_percent(seven_day)
+    has_real_data = five_pct is not None or seven_pct is not None
+    out_of_tokens = any(value is not None and value >= 100 for value in (five_pct, seven_pct))
     if out_of_tokens:
         dx, dy, sh = 0, 20, 4
     else:
         dx, dy, sh = _pokemon_motion(sp_key, anim_frame)
 
-    today_total_str = fmt_tokens(stats["today_total"])
-    week_total_str = fmt_tokens(stats["week_total"])
-    updated_hm = stats["updated_hm"]
-    daily_reset = stats.get("daily_reset", "--:--")
-    weekly_reset = stats.get("weekly_reset", "--:--")
-
-    if out_of_tokens:
-        in_str = daily_reset
-        out_str = weekly_reset
-        cache_str = "--"
-    else:
-        in_str = fmt_tokens(stats["today_in"])
-        out_str = fmt_tokens(stats["today_out"])
-        cache_str = fmt_tokens(stats["today_cache"])
-    steps = stats["today_steps"]
-    lv_val = min(99, max(1, steps)) if steps > 0 else 1
-    cache_pct = stats["cache_pct"]
-
-    if cache_pct >= 50:
-        hp_color, hp_hi = "#30B848", "#78E878"
-    elif cache_pct >= 20:
+    if five_pct is None:
+        five_label = "--%"
+        hp_fill_w = 0
+        hp_color, hp_hi = pal["bar_empty"], pal["bar_empty"]
+    elif five_pct >= 85:
+        five_label = f"{int(five_pct + 0.5)}%"
+        hp_fill_w = int(round((five_pct / 100) * 60))
+        hp_color, hp_hi = "#E83838", "#F88888"
+    elif five_pct >= 60:
+        five_label = f"{int(five_pct + 0.5)}%"
+        hp_fill_w = int(round((five_pct / 100) * 60))
         hp_color, hp_hi = "#F8C828", "#FFF080"
     else:
-        hp_color, hp_hi = "#E83838", "#F88888"
+        five_label = f"{int(five_pct + 0.5)}%"
+        hp_fill_w = int(round((five_pct / 100) * 60))
+        hp_color, hp_hi = "#30B848", "#78E878"
 
-    hp_max_w = 60
-    hp_fill_w = (max(2, int(round((cache_pct / 100.0) * hp_max_w))) // 2) * 2 if cache_pct > 0 else 0
-    hero_scale = 4 if pixel_text_width(today_total_str, 4) <= 122 else 3
+    seven_label = f"{int(seven_pct + 0.5)}%" if seven_pct is not None else "--%"
+    seven_fill_w = int(round((seven_pct / 100) * 196)) if seven_pct is not None else 0
 
-    # Build bars or "SIN TOKENS" message
-    if out_of_tokens:
-        f4 = anim_frame % 4
-        show_msg = f4 < 3
-        if show_msg:
-            bar_parts_svg = render_pixel_text("SIN TOKENS", 120, 130, 3, "#E83838", align="center", shadow=pal['shadow'], shadow_offset=2)
-            bar_parts_svg += render_pixel_text("ESPERA MAÑANA", 120, 152, 2, pal['muted'], align="center")
-        else:
-            bar_parts_svg = render_pixel_text("SIN TOKENS", 120, 130, 3, pal['muted'], align="center")
-            bar_parts_svg += render_pixel_text("ESPERA MAÑANA", 120, 152, 2, pal['bar_empty'], align="center")
-    else:
-        max_day = max((d["total"] for d in stats["week_days"]), default=0)
-        bar_parts: list[str] = []
-        start_x, slot_w, bar_w, base_y, max_h = 20, 29, 18, 148, 24
+    def reset_label(window: dict | None) -> str:
+        stamp = window.get("resets_at") if isinstance(window, dict) else None
+        if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+            return "--:--"
+        reset_at = datetime.fromtimestamp(stamp).astimezone()
+        local_today = now.astimezone().date()
+        if reset_at.date() == local_today:
+            return reset_at.strftime("%H:%M")
+        days = max(0, (reset_at.date() - local_today).days)
+        return f"+{days}D {reset_at:%H:%M}"
 
-        for idx, day in enumerate(stats["week_days"]):
-            bx = start_x + idx * slot_w
-            cx = bx + bar_w // 2
-            val = day["total"]
-            if max_day > 0 and val > 0:
-                h = (max(6, int(round((val / max_day) * max_h))) // 2) * 2
-            else:
-                h = 2
-            by = base_y - h
-            if day["is_today"]:
-                fill, hi, border, lbl_col = "#F8B800", "#FFF090", pal["border"], pal["ink"]
-            elif val > 0:
-                fill, hi, border, lbl_col = "#A855F7", "#D8B4FE", pal["border"], pal["muted"]
-            else:
-                fill, hi, border, lbl_col = pal["bar_empty"], pal["bar_empty"], pal["muted"], pal["muted"]
-
-            if h >= 6:
-                bar_parts.append(
-                    f'<rect x="{bx}" y="{by}" width="{bar_w}" height="{h}" fill="{border}"/>'
-                    f'<rect x="{bx + 2}" y="{by + 2}" width="{bar_w - 4}" height="{max(2, h - 4)}" fill="{fill}"/>'
-                    f'<rect x="{bx + 2}" y="{by + 2}" width="{bar_w - 4}" height="2" fill="{hi}"/>'
-                )
-            else:
-                bar_parts.append(f'<rect x="{bx}" y="{by}" width="{bar_w}" height="2" fill="{border}"/>')
-            bar_parts.append(render_pixel_text(day["label"], cx, 152, 2, lbl_col, align="center"))
-
-        bar_parts_svg = "".join(bar_parts)
+    five_reset = reset_label(five_hour)
+    seven_reset = reset_label(seven_day)
+    updated_at = stats.get("quota_updated_at")
+    updated_hm = (
+        datetime.fromtimestamp(updated_at).astimezone().strftime("%H:%M")
+        if has_real_data and isinstance(updated_at, (int, float)) and not isinstance(updated_at, bool)
+        else "--:--"
+    )
+    hero_value = five_label if five_pct is not None else "--%"
+    hero_scale = 4 if pixel_text_width(hero_value, 4) <= 122 else 3
+    hero_y = 54 if hero_scale == 4 else 58
+    bar_parts_svg = (
+        f'<rect x="22" y="134" width="196" height="8" fill="{pal["bg"]}"/>'
+        f'<rect x="22" y="134" width="{seven_fill_w}" height="8" fill="#A855F7"/>'
+        f'<rect x="22" y="134" width="{seven_fill_w}" height="2" fill="#D8B4FE"/>'
+        if seven_pct is not None
+        else render_pixel_text("SIN DATOS REALES", 120, 140, 2, pal["muted"], align="center")
+    )
 
     f4 = anim_frame % 4
     sparkle_svg = (
@@ -639,44 +628,52 @@ def build_claude_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
     )
 
     sx, sy = 160 + dx, 14 + dy
-    hero_y = 50 if hero_scale == 4 else 54
+    source_title = (
+        f"Uso oficial Claude Code: 5h {five_label}, 7d {seven_label}."
+        if has_real_data
+        else "Cuota real de Claude Code no disponible; falta recibir datos del status line."
+    )
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" shape-rendering="crispEdges">
+  <title>{source_title}</title>
   <rect width="240" height="240" fill="{pal['bg']}"/>
   <rect x="0" y="0" width="240" height="4" fill="{pal['top_band']}"/>
   {render_horizon_dither(72, pal['dither'])}
   {render_battle_pad(196, 74, pal['pad_top'], pal['pad_mid'], pal['pad_bot'], shadow_shrink=sh)}
   {render_sprite(POKEBALL_SPRITE, POKEBALL_PALETTE, 8, 10, 2)}
   {render_pixel_text("CLAUDE", 28, 12, 2, pal['ink'])}
-  {render_pixel_text(f"Lv{lv_val}", 146, 12, 2, pal['blue'], align="right")}
+  {render_pixel_text("REAL" if has_real_data else "SIN DATO", 146, 12, 1 if has_real_data else 2, pal['blue'], align="right")}
 
   {f'<g opacity="0.4">{render_sprite(sp_grid, sp_pal, sx, sy, 4)}</g>' if out_of_tokens else render_sprite(sp_grid, sp_pal, sx, sy, 4)}
   {(_render_defeated_fx(sx, sy, anim_frame) if out_of_tokens else _render_species_fx(sp_key, sx, sy, anim_frame))}
   {sparkle_svg}
 
   <rect x="14" y="30" width="22" height="12" fill="{pal['border']}"/>
-  {render_pixel_text("HP", 18, 33, 1, "#F8C828")}
-  <rect x="36" y="30" width="{hp_max_w + 4}" height="12" fill="{pal['border']}"/>
-  <rect x="38" y="32" width="{hp_max_w}" height="8" fill="{pal['bg']}"/>
+  {render_pixel_text("5H", 18, 33, 1, "#F8C828")}
+  <rect x="36" y="30" width="64" height="12" fill="{pal['border']}"/>
+  <rect x="38" y="32" width="60" height="8" fill="{pal['bg']}"/>
   <rect x="38" y="32" width="{hp_fill_w}" height="8" fill="{hp_color}"/>
   <rect x="38" y="32" width="{hp_fill_w}" height="2" fill="{hp_hi}"/>
-  {render_pixel_text(f"{cache_pct}%", 146, 30, 2, pal['ink'], align="right")}
+  {render_pixel_text(five_label, 146, 30, 2, pal['ink'], align="right")}
 
-  {render_pixel_text(today_total_str, 18, hero_y, hero_scale, pal['ink'], shadow=pal['shadow'], shadow_offset=2)}
+  {render_pixel_text("USO 5H", 18, 48, 2, pal['muted'])}
+  {render_pixel_text(hero_value, 18, hero_y, hero_scale, pal['ink'], shadow=pal['shadow'], shadow_offset=2)}
   {render_battle_bracket(8, 28, 134, 60, pal['border'], "#A855F7")}
 
   {_render_card_frame(8, 100, 224, 66, pal)}
-  {render_pixel_text("EXP 7D", 16, 106, 2, pal['blue'])}
-  {render_pixel_text(week_total_str, 224, 106, 2, pal['ink'], align="right")}
+  {render_pixel_text("USO 7D", 16, 106, 2, pal['blue'])}
+  {render_pixel_text(seven_label, 224, 106, 2, pal['ink'], align="right")}
   {render_dotted_rule(16, 120, 208, pal['divider'])}
+  <rect x="20" y="132" width="200" height="12" fill="{pal['border']}"/>
   {bar_parts_svg}
+  {render_pixel_text("LIMITE" if out_of_tokens else "7D", 20, 150, 1, "#E83838" if out_of_tokens else pal['muted'])}
+  {render_pixel_text(seven_reset, 216, 150, 1, pal['muted'], align="right")}
 
   {_render_dialogue_box_themed(8, 172, 224, 62, pal)}
-  {render_pixel_text(f"IN:{in_str}", 20, 186, 2, pal['ink']) if not out_of_tokens else render_pixel_text(f"D:{in_str}", 20, 186, 2, pal['ink'])}
-  {render_pixel_text(f"OUT:{out_str}", 216, 186, 2, pal['ink'], align="right") if not out_of_tokens else render_pixel_text(f"W:{out_str}", 216, 186, 2, pal['ink'], align="right")}
-  {render_pixel_text(f"CCH:{cache_str}", 20, 206, 2, pal['blue'])}
-  {render_pixel_text(updated_hm, 200, 206, 2, pal['muted'], align="right")}
-  {render_pixel_text(f"D:{daily_reset}", 20, 222, 2, pal['muted']) if not out_of_tokens else ""}
-  {render_pixel_text(f"W:{weekly_reset}", 216, 222, 2, pal['muted'], align="right") if not out_of_tokens else ""}
+  {render_pixel_text("5H RESET", 20, 185, 2, pal['ink'])}
+  {render_pixel_text(five_reset, 216, 185, 2, pal['ink'], align="right")}
+  {render_pixel_text("7D RESET", 20, 205, 2, pal['ink'])}
+  {render_pixel_text(seven_reset, 216, 205, 2, pal['ink'], align="right")}
+  {render_pixel_text(f"REAL {updated_hm}" if has_real_data else "CONFIGURA STATUS LINE", 20, 222, 1, pal['muted'])}
 </svg>
 '''
 

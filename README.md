@@ -14,6 +14,7 @@ poke-ctl show clock | weather | gemini | spotify
 poke-ctl auto
 poke-ctl notify "BUILD OK" "Tests 100% verdes" --pokemon pikachu --ttl 12
 poke-ctl brightness 85
+poke-ctl display on           # Encender la pantalla; también admite `off`
 poke-ctl rotation 0          # 0, 1, 2 (180°), 3
 poke-ctl toggle weather off
 poke-ctl toggle spotify_priority on
@@ -27,9 +28,23 @@ poke-ctl toggle spotify_priority on
     sudo ./scripts/setup-domain.sh
     ```
 - También disponible siempre en **`http://localhost:8765/`** (o `http://192.168.18.27:8765/`).
-- Endpoints JSON: `GET /api/status`, `GET /api/preview/<card>`, `POST /api/show`, `POST /api/auto`, `POST /api/notify`, `POST /api/config`, `POST /api/brightness`, `POST /api/rotation`, `POST /api/refresh`.
+- Endpoints JSON: `GET /api/status`, `GET /api/preview/<card>`, `POST /api/show`, `POST /api/auto`, `POST /api/notify`, `POST /api/config`, `POST /api/brightness`, `POST /api/display` (ej. `{"on": false}`), `POST /api/rotation`, `POST /api/refresh`, `POST /api/yellow-duck`.
+
+## Yellow Duck con Psyduck
+
+La pestaña **Psyduck** permite conversar por texto con Gemini usando la técnica del patito amarillo. El dictado y la lectura de respuestas son opcionales y dependen del navegador; el texto dictado se puede revisar antes de enviarlo. La conversación se conserva solo en la pestaña abierta y Poké-Hub no la guarda.
+
+Para responder, el proceso de `poke-clock.service` debe tener `GEMINI_API_KEY` en su entorno. La clave permanece en el hub y no se envía al navegador. Sin ella, la interfaz indica cómo corregir la configuración. Las solicitudes al endpoint son del mismo origen y se limitan a 8 por minuto por cliente.
+
+## Cuota real de Claude Code
+
+La tarjeta Claude lee los periodos oficiales `five_hour` y `seven_day` que Claude Code proporciona a su status line; los conteos de tokens de archivos de sesión no se usan como cuota. En `~/.claude/settings.json`, configura `statusLine` para ejecutar `python3 /ruta/absoluta/al/proyecto/scripts/claude_usage_statusline.py`. El status line guarda únicamente esos porcentajes, sus horarios de reinicio y la hora de actualización en `~/.cache/poke-hub/claude-rate-limits.json`, con permisos privados; no copia conversaciones ni credenciales.
+
+Los datos aparecen después de que Claude Code proporcione una actualización real. Si no se recibe o la última actualización supera 24 horas, la tarjeta dice **sin datos reales** en vez de mostrar una estimación.
 
 ## Servicio automático (`systemd --user`)
+
+Al detener `poke-clock.service`, incluido el apagado normal de la computadora, Poké-Hub consulta `/status` y solo ordena apagar la pantalla si identifica `PokeDisplay` con firmware `1.5.0` o posterior y estado `display_on`. El reloj mantiene Wi‑Fi activo; requiere un apagado ordenado (no un corte de energía).
 
 ```bash
 systemctl --user status poke-clock.service

@@ -34,6 +34,7 @@ class RawFrameDriver(DisplayDriver):
         self._lock = threading.RLock()
         self._conn: http.client.HTTPConnection | None = None
         self._last_pushed_key: tuple[str, int, int, str] = ("", 0, 0, "")
+        self._display_power_supported = False
         self.last_push_ms = 0
         self.last_error = ""
 
@@ -243,6 +244,41 @@ class RawFrameDriver(DisplayDriver):
                 self.last_error = str(exc)
                 return False
 
+    @property
+    def supports_display_power(self) -> bool:
+        return self._display_power_supported
+
+    @staticmethod
+    def _status_supports_display_power(status: dict) -> bool:
+        if status.get("device") != "poke-display" or not isinstance(status.get("display_on"), bool):
+            return False
+        version = str(status.get("version") or "").strip().lower().removeprefix("v")
+        version_parts = version.split(".")
+        if len(version_parts) != 3 or not all(part.isdigit() for part in version_parts):
+            return False
+        return tuple(int(part) for part in version_parts) >= (1, 5, 0)
+
+    def check_display_power_support(self) -> bool:
+        status = self.get_status()
+        return self._status_supports_display_power(status)
+
+    def set_display_power(self, on: bool) -> bool:
+        if not self.check_display_power_support():
+            self.last_error = "display power requires compatible PokeDisplay firmware 1.5.0 or newer"
+            return False
+        with self._lock:
+            try:
+                raw = self._request("GET", f"/display?on={1 if on else 0}")
+                result = json.loads(raw.decode("utf-8"))
+                if result.get("ok") is not True or result.get("display_on") is not on:
+                    raise RuntimeError("firmware did not confirm the requested display state")
+                self._last_pushed_key = ("", 0, 0, "")
+                self.last_error = ""
+                return True
+            except Exception as exc:
+                self.last_error = str(exc)
+                return False
+
     def set_rotation(self, rotation: int) -> bool:
         rot = int(rotation) % 4
         with self._lock:
@@ -262,8 +298,10 @@ class RawFrameDriver(DisplayDriver):
                 data["online"] = True
                 data["driver"] = self.name
                 data["last_push_ms"] = self.last_push_ms
+                self._display_power_supported = self._status_supports_display_power(data)
                 return data
             except Exception as exc:
+                self._display_power_supported = False
                 self.last_error = str(exc)
                 return {"online": False, "driver": self.name, "error": str(exc)}
 

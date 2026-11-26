@@ -57,6 +57,7 @@ class MockDriver(DisplayDriver):
         self.pushes: list[tuple[str, int, str]] = []
         self.brightness = 95
         self.rotation = 0
+        self.display_on = True
         self._last_hash = ""
 
     def push_frame(self, card_id: str, jpg_bytes: bytes, content_hash: str, force: bool = False) -> dict:
@@ -74,8 +75,22 @@ class MockDriver(DisplayDriver):
         self.rotation = rotation
         return True
 
+    @property
+    def supports_display_power(self) -> bool:
+        return True
+
+    def set_display_power(self, on: bool) -> bool:
+        self.display_on = on
+        return True
+
     def get_status(self) -> dict:
-        return {"online": True, "driver": self.name, "frames": len(self.pushes), "last_push_ms": 18}
+        return {
+            "online": True,
+            "driver": self.name,
+            "frames": len(self.pushes),
+            "last_push_ms": 18,
+            "display_on": self.display_on,
+        }
 
     def ping(self) -> bool:
         return True
@@ -125,6 +140,20 @@ class TestPokeHub(unittest.TestCase):
         card, reason = self.engine.resolve_active_card_locked(now + 11)
         self.assertEqual((card, reason), ("gemini", "pinned"))
 
+    def test_status_exposes_official_claude_rate_limits(self) -> None:
+        self.engine.claude_stats = {
+            "quota_source": "claude-code-statusline",
+            "quota_updated_at": 1_800_000_000,
+            "rate_limits": {
+                "five_hour": {"used_percentage": 42.0, "resets_at": 1_800_001_800},
+            },
+        }
+
+        quota = self.engine.get_status()["claude_quota"]
+
+        self.assertEqual(quota["source"], "claude-code-statusline")
+        self.assertEqual(quota["rate_limits"]["five_hour"]["used_percentage"], 42.0)
+
     def test_notify_card_renders_valid_jpeg(self) -> None:
         svg = build_notify_svg("BUILD OK", "Todos los tests pasaron", pokemon="charmander")
         jpg = render_svg_to_jpg_bytes(svg)
@@ -166,6 +195,59 @@ class TestPokeHub(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_display_power_api_pauses_and_resumes_frames(self) -> None:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.engine))
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            def post_display(on: bool) -> dict:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/display",
+                    data=json.dumps({"on": on}).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+
+            off = post_display(False)
+            self.assertFalse(off["display_on"])
+            pushes_while_off = len(self.driver.pushes)
+            self.engine._push_now(force=True)
+            self.assertEqual(len(self.driver.pushes), pushes_while_off)
+
+            on = post_display(True)
+            self.assertTrue(on["display_on"])
+            self.assertGreater(len(self.driver.pushes), pushes_while_off)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_engine_stop_turns_display_off(self) -> None:
+        self.engine.stop()
+        self.assertFalse(self.driver.display_on)
+
+    def test_display_power_on_reconciles_stale_hub_state(self) -> None:
+        self.driver.display_on = False
+
+        result = self.engine.set_display_power(True)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(self.driver.display_on)
+
+    def test_raw_engine_stop_turns_display_off_instead_of_standby(self) -> None:
+        engine = PokeHubEngine(config_path=self.cfg_path, start_watchers=False)
+        driver = engine.driver
+        calls: list[tuple[str, bool]] = []
+        driver.set_display_power = lambda on: calls.append(("display", on)) or True  # type: ignore[method-assign]
+        driver.get_status = lambda: {"online": True, "display_on": False}  # type: ignore[method-assign]
+        driver.enter_standby = lambda: calls.append(("standby", True)) or True  # type: ignore[method-assign]
+
+        engine.stop()
+
+        self.assertEqual(calls, [("display", False)])
 
     def test_mdns_publisher_url_formatting_and_status(self) -> None:
         pub = MdnsPublisher(domain="pokeclock", port=8765)
@@ -236,6 +318,70 @@ class TestPokeHub(unittest.TestCase):
         self.assertIn("hum=78", path)
         self.assertIn("wcity=Paracas", path)
         self.assertIn("hm=01%3A15", path)
+
+    def test_raw_driver_display_power_command(self) -> None:
+        drv = RawFrameDriver("127.0.0.1")
+        captured: list[tuple[str, str]] = []
+
+        def request(method: str, path: str, **kwargs) -> bytes:
+            captured.append((method, path))
+            if path.startswith("/status"):
+                return b'{"device":"poke-display","version":"1.5.0","display_on":true}'
+            on = path.endswith("on=1")
+            return json.dumps({"ok": True, "display_on": on}).encode("utf-8")
+
+        drv._request = request  # type: ignore[method-assign]
+
+        self.assertTrue(drv.check_display_power_support())
+        self.assertTrue(drv.supports_display_power)
+        self.assertTrue(drv.set_display_power(False))
+        self.assertTrue(drv.set_display_power(True))
+        self.assertEqual(
+            [path for _, path in captured if path.startswith("/display?")],
+            ["/display?on=0", "/display?on=1"],
+        )
+
+    def test_raw_driver_does_not_power_off_incompatible_firmware(self) -> None:
+        incompatible_statuses = [
+            {"device": "poke-display", "version": "1.4.9", "display_on": True},
+            {"device": "other-device", "version": "1.5.0", "display_on": True},
+            {"device": "poke-display", "version": "1.5.0"},
+            {"device": "poke-display", "version": "1.5.0", "display_on": "true"},
+            {"device": "poke-display", "version": "unknown", "display_on": True},
+        ]
+        for status in incompatible_statuses:
+            with self.subTest(status=status):
+                drv = RawFrameDriver("127.0.0.1")
+                captured: list[tuple[str, str]] = []
+
+                def request(method: str, path: str, **kwargs) -> bytes:
+                    captured.append((method, path))
+                    return json.dumps(status).encode("utf-8")
+
+                drv._request = request  # type: ignore[method-assign]
+
+                self.assertFalse(drv.check_display_power_support())
+                self.assertFalse(drv.set_display_power(False))
+                self.assertFalse(any(path.startswith("/display?") for _, path in captured))
+
+    def test_engine_stop_does_not_power_off_incompatible_raw_firmware(self) -> None:
+        drv = RawFrameDriver("127.0.0.1")
+        captured: list[tuple[str, str]] = []
+
+        def request(method: str, path: str, **kwargs) -> bytes:
+            captured.append((method, path))
+            return json.dumps({
+                "device": "poke-display",
+                "version": "1.4.9",
+                "display_on": True,
+            }).encode("utf-8")
+
+        drv._request = request  # type: ignore[method-assign]
+        engine = PokeHubEngine(driver=drv, config_path=self.cfg_path, start_watchers=False)
+
+        engine.stop()
+
+        self.assertFalse(any(path.startswith("/display?") for _, path in captured))
 
     def test_render_engine_valid_jpeg_and_dark_palette(self) -> None:
         now = datetime(2026, 11, 22, 22, 15)
@@ -776,7 +922,10 @@ class TestPokeHub(unittest.TestCase):
         claude_glob = str(Path(self.tmp.name) / "**" / "*.jsonl")
         with state_engine._CLAUDE_CACHE_LOCK:
             state_engine._CLAUDE_FILE_CACHE.clear()
-        with mock.patch.object(state_engine, "CLAUDE_PROJECT_GLOB", claude_glob):
+        with (
+            mock.patch.object(state_engine, "CLAUDE_PROJECT_GLOB", claude_glob),
+            mock.patch.object(state_engine, "CLAUDE_RATE_LIMITS_PATH", Path(self.tmp.name) / "no-rate-limits.json"),
+        ):
             c_stats = collect_claude_usage()
         self.assertEqual(c_stats["today_in"], 100)
         self.assertEqual(c_stats["today_out"], 75)
