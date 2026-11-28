@@ -576,15 +576,15 @@ def build_claude_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
         hp_color, hp_hi = pal["bar_empty"], pal["bar_empty"]
     elif five_pct >= 85:
         five_label = f"{int(five_pct + 0.5)}%"
-        hp_fill_w = int(round((five_pct / 100) * 60))
+        hp_fill_w = int(round((five_pct / 100) * 114))
         hp_color, hp_hi = "#E83838", "#F88888"
     elif five_pct >= 60:
         five_label = f"{int(five_pct + 0.5)}%"
-        hp_fill_w = int(round((five_pct / 100) * 60))
+        hp_fill_w = int(round((five_pct / 100) * 114))
         hp_color, hp_hi = "#F8C828", "#FFF080"
     else:
         five_label = f"{int(five_pct + 0.5)}%"
-        hp_fill_w = int(round((five_pct / 100) * 60))
+        hp_fill_w = int(round((five_pct / 100) * 114))
         hp_color, hp_hi = "#30B848", "#78E878"
 
     seven_label = f"{int(seven_pct + 0.5)}%" if seven_pct is not None else "--%"
@@ -610,14 +610,21 @@ def build_claude_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
         else "--:--"
     )
     hero_value = five_label if five_pct is not None else "--%"
-    hero_scale = 4 if pixel_text_width(hero_value, 4) <= 122 else 3
-    hero_y = 54 if hero_scale == 4 else 58
+    hero_scale = 4 if pixel_text_width(hero_value, 4) <= 116 else 3
+    header_status = (
+        "REAL" if five_pct is not None and seven_pct is not None
+        else "PARCIAL" if has_real_data
+        else "SIN DATOS"
+    )
+    header_status_scale = 2 if pixel_text_width(header_status, 2) <= 116 else 1
     bar_parts_svg = (
-        f'<rect x="22" y="134" width="196" height="8" fill="{pal["bg"]}"/>'
-        f'<rect x="22" y="134" width="{seven_fill_w}" height="8" fill="#A855F7"/>'
-        f'<rect x="22" y="134" width="{seven_fill_w}" height="2" fill="#D8B4FE"/>'
+        f'<g id="claude-weekly-bar">'
+        f'<rect x="22" y="130" width="196" height="8" fill="{pal["bg"]}"/>'
+        f'<rect x="22" y="130" width="{seven_fill_w}" height="8" fill="#A855F7"/>'
+        f'<rect x="22" y="130" width="{seven_fill_w}" height="2" fill="#D8B4FE"/>'
+        f'</g>'
         if seven_pct is not None
-        else render_pixel_text("SIN DATOS REALES", 120, 140, 2, pal["muted"], align="center")
+        else f'<g id="claude-weekly-empty">{render_pixel_text("SIN DATOS", 120, 130, 2, pal["muted"], align="center")}</g>'
     )
 
     f4 = anim_frame % 4
@@ -626,8 +633,17 @@ def build_claude_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
         if f4 in (0, 2)
         else _render_twinkle(224, 12, "#F8D030", alt=(f4 == 1))
     )
-
     sx, sy = 160 + dx, 14 + dy
+    pokemon_svg = (
+        f'<g opacity="0.4">{render_sprite(sp_grid, sp_pal, sx, sy, 4)}</g>'
+        if out_of_tokens
+        else render_sprite(sp_grid, sp_pal, sx, sy, 4)
+    )
+    pokemon_svg += _render_defeated_fx(sx, sy, anim_frame) if out_of_tokens else _render_species_fx(sp_key, sx, sy, anim_frame)
+
+    def text_group(group_id: str, svg_text: str) -> str:
+        return f'<g id="{group_id}">{svg_text}</g>'
+
     source_title = (
         f"Uso oficial Claude Code: 5h {five_label}, 7d {seven_label}."
         if has_real_data
@@ -640,40 +656,32 @@ def build_claude_svg(stats: dict, cfg: dict | None = None, anim_frame: int = 0, 
   {render_horizon_dither(72, pal['dither'])}
   {render_battle_pad(196, 74, pal['pad_top'], pal['pad_mid'], pal['pad_bot'], shadow_shrink=sh)}
   {render_sprite(POKEBALL_SPRITE, POKEBALL_PALETTE, 8, 10, 2)}
-  {render_pixel_text("CLAUDE", 28, 12, 2, pal['ink'])}
-  {render_pixel_text("REAL" if has_real_data else "SIN DATO", 146, 12, 1 if has_real_data else 2, pal['blue'], align="right")}
+  {text_group("claude-header-title", render_pixel_text("CLAUDE", 28, 12, 2, pal['ink']))}
+  {text_group("claude-header-status", render_pixel_text(header_status, 28, 24, header_status_scale, pal['blue']))}
 
-  {f'<g opacity="0.4">{render_sprite(sp_grid, sp_pal, sx, sy, 4)}</g>' if out_of_tokens else render_sprite(sp_grid, sp_pal, sx, sy, 4)}
-  {(_render_defeated_fx(sx, sy, anim_frame) if out_of_tokens else _render_species_fx(sp_key, sx, sy, anim_frame))}
+  <g id="claude-pokemon">{pokemon_svg}</g>
   {sparkle_svg}
 
-  <rect x="14" y="30" width="22" height="12" fill="{pal['border']}"/>
-  {render_pixel_text("5H", 18, 33, 1, "#F8C828")}
-  <rect x="36" y="30" width="64" height="12" fill="{pal['border']}"/>
-  <rect x="38" y="32" width="60" height="8" fill="{pal['bg']}"/>
-  <rect x="38" y="32" width="{hp_fill_w}" height="8" fill="{hp_color}"/>
-  <rect x="38" y="32" width="{hp_fill_w}" height="2" fill="{hp_hi}"/>
-  {render_pixel_text(five_label, 146, 30, 2, pal['ink'], align="right")}
-
-  {render_pixel_text("USO 5H", 18, 48, 2, pal['muted'])}
-  {render_pixel_text(hero_value, 18, hero_y, hero_scale, pal['ink'], shadow=pal['shadow'], shadow_offset=2)}
   {render_battle_bracket(8, 28, 134, 60, pal['border'], "#A855F7")}
+  {text_group("claude-primary-label", render_pixel_text("USO 5H", 18, 38, 2, pal['muted']))}
+  {text_group("claude-primary-value", render_pixel_text(hero_value, 18, 52, hero_scale, pal['ink'], shadow=pal['shadow'], shadow_offset=2))}
+  <rect x="18" y="80" width="118" height="10" fill="{pal['border']}"/>
+  <rect x="20" y="82" width="114" height="6" fill="{pal['bg']}"/>
+  <rect x="20" y="82" width="{hp_fill_w}" height="6" fill="{hp_color}"/>
+  <rect x="20" y="82" width="{hp_fill_w}" height="2" fill="{hp_hi}"/>
 
-  {_render_card_frame(8, 100, 224, 66, pal)}
-  {render_pixel_text("USO 7D", 16, 106, 2, pal['blue'])}
-  {render_pixel_text(seven_label, 224, 106, 2, pal['ink'], align="right")}
+  {_render_card_frame(8, 100, 224, 52, pal)}
+  {text_group("claude-weekly-title", render_pixel_text("USO 7D", 16, 106, 2, pal['blue']))}
+  {text_group("claude-weekly-value", render_pixel_text(seven_label, 224, 106, 2, pal['ink'], align="right"))}
   {render_dotted_rule(16, 120, 208, pal['divider'])}
-  <rect x="20" y="132" width="200" height="12" fill="{pal['border']}"/>
   {bar_parts_svg}
-  {render_pixel_text("LIMITE" if out_of_tokens else "7D", 20, 150, 1, "#E83838" if out_of_tokens else pal['muted'])}
-  {render_pixel_text(seven_reset, 216, 150, 1, pal['muted'], align="right")}
 
-  {_render_dialogue_box_themed(8, 172, 224, 62, pal)}
-  {render_pixel_text("5H RESET", 20, 185, 2, pal['ink'])}
-  {render_pixel_text(five_reset, 216, 185, 2, pal['ink'], align="right")}
-  {render_pixel_text("7D RESET", 20, 205, 2, pal['ink'])}
-  {render_pixel_text(seven_reset, 216, 205, 2, pal['ink'], align="right")}
-  {render_pixel_text(f"REAL {updated_hm}" if has_real_data else "CONFIGURA STATUS LINE", 20, 222, 1, pal['muted'])}
+  {_render_dialogue_box_themed(8, 158, 224, 76, pal)}
+  {text_group("claude-reset-5h-label", render_pixel_text("5H RESET", 20, 170, 2, pal['ink']))}
+  {text_group("claude-reset-5h-value", render_pixel_text(five_reset, 216, 170, 2, pal['ink'], align="right"))}
+  {text_group("claude-reset-7d-label", render_pixel_text("7D RESET", 20, 188, 2, pal['ink']))}
+  {text_group("claude-reset-7d-value", render_pixel_text(seven_reset, 216, 188, 2, pal['ink'], align="right"))}
+  {text_group("claude-statusline-hint", render_pixel_text(f"REAL {updated_hm}" if has_real_data else "CONFIGURA STATUS LINE", 20, 214, 1, pal['muted']))}
 </svg>
 '''
 

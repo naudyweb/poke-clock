@@ -10,9 +10,12 @@ from __future__ import annotations
 import copy
 import glob
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -45,6 +48,7 @@ from screens import (
 )
 
 CONFIG_PATH = Path.home() / ".config" / "poke-hub" / "config.json"
+DEVICE_MDNS_HOSTNAME = "poke-display.local"
 
 DEFAULT_CONFIG = {
     "host": "192.168.18.26",
@@ -112,6 +116,38 @@ _CLAUDE_CACHE_LOCK = threading.Lock()
 _CLAUDE_FILE_CACHE: dict[str, tuple[int, int, dict | None]] = {}
 
 _CLAUDE_RETENTION_S = 8 * 86400
+
+
+def discover_device_ipv4(hostname: str = DEVICE_MDNS_HOSTNAME, timeout: float = 2.0) -> str | None:
+    """Resolve the ESP8266 mDNS hostname directly via Avahi (bypasses stale /etc/hosts entries)."""
+    avahi_bin = shutil.which("avahi-resolve")
+    if not avahi_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [avahi_bin, "-4", "-n", hostname],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        candidate = parts[-1]
+        try:
+            addr = ipaddress.IPv4Address(candidate)
+        except ipaddress.AddressValueError:
+            continue
+        if addr.is_loopback or addr.is_unspecified or addr.is_multicast:
+            continue
+        return str(addr)
+    return None
 
 
 def render_svg_to_jpg_bytes(svg_content: str, bg_hex: str = "#F8F8F0") -> bytes:
@@ -719,6 +755,7 @@ class PokeHubEngine:
         self._last_clock_hm: str = ""
         self._last_device_status: dict = {}
         self._display_on = True
+        self._pending_startup_display_on = True
         self._last_night_state: bool | None = None
 
         # Notification FIFO queue & history
@@ -763,6 +800,47 @@ class PokeHubEngine:
         # Default to RawFrameDriver (will auto-connect once ESP8266 boots)
         return raw
 
+    def _rediscover_device(self, current_host: str) -> bool:
+        """If the ESP8266 changed DHCP IP, find it via mDNS (poke-display.local) and switch over."""
+        if self._external_driver:
+            return False
+        discovered_ip = discover_device_ipv4()
+        if not discovered_ip or discovered_ip == current_host:
+            return False
+
+        candidate = RawFrameDriver(discovered_ip)
+        if not candidate.ping():
+            candidate._close_conn()
+            return False
+
+        old_drv: DisplayDriver | None = None
+        rot = 0
+        with self._lock:
+            if str(self.config.get("host") or "") != current_host:
+                candidate._close_conn()
+                return False
+            old_drv = self.driver
+            self.config["host"] = discovered_ip
+            self.driver = candidate
+            self._offline_failures = 0
+            self._next_push_retry_mono = 0.0
+            self._last_base_key = ("", "")
+            rot = int(self.config.get("rotation", 0))
+
+        self._save_config()
+        if isinstance(old_drv, RawFrameDriver) and old_drv is not candidate:
+            old_drv._close_conn()
+
+        self._sync_device_status(candidate)
+
+        self._apply_effective_brightness()
+        if rot:
+            candidate.set_rotation(rot)
+        self._sync_offline_config()
+        print(f"[hub] Auto-discovered poke-display via mDNS: {current_host} -> {discovered_ip}", flush=True)
+        self._wake.set()
+        return True
+
     def _load_config(self) -> dict:
         cfg = copy.deepcopy(DEFAULT_CONFIG)
         try:
@@ -805,6 +883,8 @@ class PokeHubEngine:
         if self._worker_thread is not None and self._worker_thread.is_alive():
             return
         self._stop.clear()
+        with self._lock:
+            self._pending_startup_display_on = True
         if self._start_watchers:
             self._spotify_watcher = SpotifyWatcher(self._on_spotify_event)
             self._spotify_watcher.start()
@@ -1078,6 +1158,56 @@ class PokeHubEngine:
         self._wake.set()
         return self.get_status()
 
+    def _sync_device_status(self, driver: DisplayDriver) -> tuple[dict, bool]:
+        """Query device status and wake the display once on startup if it was left asleep."""
+        display_woke = False
+        with self._display_power_lock:
+            st = driver.get_status()
+            reported_display_on = st.get("display_on")
+            should_wake_on_startup = False
+            with self._lock:
+                self._last_device_status = st
+                if st.get("online"):
+                    self._offline_failures = 0
+                    self._next_push_retry_mono = 0.0
+                    # If weather data is missing, force a retry now that we're online
+                    if self.weather_data is None:
+                        self._last_weather_ts = 0.0
+                    if self._pending_startup_display_on:
+                        if reported_display_on is False and driver.supports_display_power:
+                            should_wake_on_startup = True
+                        else:
+                            self._pending_startup_display_on = False
+                            if isinstance(reported_display_on, bool):
+                                display_woke = reported_display_on and not self._display_on
+                                self._display_on = reported_display_on
+                                if display_woke:
+                                    self._last_base_key = ("", "")
+                    elif isinstance(reported_display_on, bool):
+                        display_woke = reported_display_on and not self._display_on
+                        self._display_on = reported_display_on
+                        if display_woke:
+                            self._last_base_key = ("", "")
+
+            if should_wake_on_startup and not self._stop.is_set():
+                if driver.set_display_power(True):
+                    st = dict(st)
+                    st["display_on"] = True
+                    with self._lock:
+                        self._last_device_status = st
+                        self._display_on = True
+                        self._pending_startup_display_on = False
+                        self._last_base_key = ("", "")
+                        self._last_active_frame_hash = ""
+                        self._offline_failures = 0
+                        self._next_push_retry_mono = 0.0
+                    display_woke = True
+                    print("[hub] Woke display on startup", flush=True)
+                else:
+                    with self._lock:
+                        self._display_on = False
+        return st, display_woke
+
     def set_display_power(self, on: bool) -> dict:
         """Control the physical display while leaving the Wi-Fi device online."""
         with self._display_power_lock:
@@ -1085,6 +1215,8 @@ class PokeHubEngine:
                 driver = self.driver
                 previous = self._display_on
                 self._display_on = on
+                if not on:
+                    self._pending_startup_display_on = False
 
             if not driver.set_display_power(on):
                 with self._lock:
@@ -1099,6 +1231,9 @@ class PokeHubEngine:
                 }
 
             with self._lock:
+                self._pending_startup_display_on = False
+                if isinstance(self._last_device_status, dict) and self._last_device_status:
+                    self._last_device_status["display_on"] = on
                 if on:
                     self._last_base_key = ("", "")
                     self._last_active_frame_hash = ""
@@ -1851,6 +1986,14 @@ class PokeHubEngine:
                     self._next_push_retry_mono = 0.0
             return {"ok": True, "card": card, "reason": reason, **res}
         except Exception as exc:
+            if "HTTP 423" in str(exc):
+                with self._lock:
+                    pending_wake = self._pending_startup_display_on
+                if pending_wake and not self._stop.is_set():
+                    _, woke = self._sync_device_status(drv)
+                    if woke:
+                        self._apply_effective_brightness()
+                        return self._push_now(force=True, manual=manual)
             print(f"[push] Error sending {card}: {exc}", flush=True)
             with self._lock:
                 self._last_base_key = ("", "")
@@ -1860,7 +2003,7 @@ class PokeHubEngine:
             return {"ok": False, "card": card, "error": str(exc)}
 
     def _run_loop(self) -> None:
-        last_health_ts = 0.0
+        last_health_ts = -20.0
 
         # Non-blocking startup network bootstrap
         with self._lock:
@@ -1876,6 +2019,12 @@ class PokeHubEngine:
                     self.driver = detected
             if isinstance(old_drv, RawFrameDriver) and old_drv is not detected:
                 old_drv._close_conn()
+
+        if not self._stop.is_set():
+            with self._lock:
+                drv = self.driver
+            st, _ = self._sync_device_status(drv)
+            last_health_ts = time.monotonic() if st.get("online") else time.monotonic() - 15.0
 
         if not self._stop.is_set():
             self._refresh_gemini()
@@ -1988,40 +2137,26 @@ class PokeHubEngine:
                     drv = self.driver
                     host = str(self.config["host"])
                     ext_drv = self._external_driver
-                display_woke = False
-                with self._display_power_lock:
-                    st = drv.get_status()
-                    with self._lock:
-                        self._last_device_status = st
-                        reported_display_on = st.get("display_on")
-                        if isinstance(reported_display_on, bool):
-                            display_woke = reported_display_on and not self._display_on
-                            self._display_on = reported_display_on
-                            if display_woke:
-                                self._last_base_key = ("", "")
-                        if st.get("online"):
-                            self._offline_failures = 0
-                            self._next_push_retry_mono = 0.0
-                            # If weather data is missing, force a retry now that we're online
-                            if self.weather_data is None:
-                                self._last_weather_ts = 0.0
+                st, display_woke = self._sync_device_status(drv)
                 if display_woke:
+                    self._apply_effective_brightness()
                     self._wake.set()
                 if not st.get("online"):
                     if not ext_drv:
-                        new_drv = self._detect_driver(host)
-                        if new_drv.name != drv.name:
-                            old_drv = None
-                            with self._lock:
-                                if str(self.config["host"]) == host:
-                                    old_drv = self.driver
-                                    self.driver = new_drv
-                                    self._offline_failures = 0
-                                    self._next_push_retry_mono = 0.0
-                                    self._last_base_key = ("", "")
-                            if isinstance(old_drv, RawFrameDriver) and old_drv is not new_drv:
-                                old_drv._close_conn()
-                            print(f"[hub] Switched driver to {new_drv.name}", flush=True)
+                        if not self._rediscover_device(host):
+                            new_drv = self._detect_driver(host)
+                            if new_drv.name != drv.name:
+                                old_drv = None
+                                with self._lock:
+                                    if str(self.config["host"]) == host:
+                                        old_drv = self.driver
+                                        self.driver = new_drv
+                                        self._offline_failures = 0
+                                        self._next_push_retry_mono = 0.0
+                                        self._last_base_key = ("", "")
+                                if isinstance(old_drv, RawFrameDriver) and old_drv is not new_drv:
+                                    old_drv._close_conn()
+                                print(f"[hub] Switched driver to {new_drv.name}", flush=True)
                 elif isinstance(drv, RawFrameDriver) and st.get("frames", 1) == 0:
                     # Device just rebooted -> force re-push active frame & sync offline config!
                     drv.invalidate_cache()
