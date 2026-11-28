@@ -7,6 +7,8 @@ Runs on 0.0.0.0:8765 — 100% local PC control with instant screen pushing.
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 from html import escape
 import json
 import os
@@ -28,22 +30,29 @@ from hub.yellow_duck import YellowDuckError, reply_to_yellow_duck
 
 UI_HTML_PATH = Path(__file__).resolve().parent / "ui.html"
 _UI_CACHE_LOCK = threading.Lock()
-_UI_CACHE: tuple[int, bytes] | None = None
+_UI_CACHE: tuple[int, bytes, bytes, str] | None = None
 YELLOW_DUCK_RATE_LIMIT = 8
 YELLOW_DUCK_RATE_WINDOW_S = 60.0
 
 
-def _get_ui_html() -> bytes:
-    """Return ui.html bytes cached in RAM, reloading only when mtime_ns changes."""
+def _get_ui_html_bundle() -> tuple[bytes, bytes, str]:
+    """Return (raw_html, gzip_html, etag_hash) cached in RAM, reloading only on mtime_ns change."""
     global _UI_CACHE
     mtime_ns = UI_HTML_PATH.stat().st_mtime_ns
     with _UI_CACHE_LOCK:
         if _UI_CACHE is not None and _UI_CACHE[0] == mtime_ns:
-            return _UI_CACHE[1]
+            return _UI_CACHE[1], _UI_CACHE[2], _UI_CACHE[3]
     html = UI_HTML_PATH.read_bytes()
+    gz_html = gzip.compress(html, compresslevel=6)
+    etag_hash = hashlib.sha256(html).hexdigest()[:16]
     with _UI_CACHE_LOCK:
-        _UI_CACHE = (mtime_ns, html)
-    return html
+        _UI_CACHE = (mtime_ns, html, gz_html, etag_hash)
+    return html, gz_html, etag_hash
+
+
+def _get_ui_html() -> bytes:
+    """Return ui.html bytes cached in RAM, reloading only when mtime_ns changes."""
+    return _get_ui_html_bundle()[0]
 
 
 def _etag_matches(header_value: str, etag: str, etag_hash: str) -> bool:
@@ -162,12 +171,27 @@ def make_handler(engine: PokeHubEngine, mdns: MdnsPublisher | None = None):
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
-                html = _get_ui_html()
+                html, gz_html, etag_hash = _get_ui_html_bundle()
+                etag = f'"{etag_hash}"'
+                if _etag_matches(self.headers.get("If-None-Match", ""), etag, etag_hash):
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    return
+                accept_enc = self.headers.get("Accept-Encoding", "").lower()
+                use_gzip = "gzip" in accept_enc
+                body_bytes = gz_html if use_gzip else html
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(html)))
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Vary", "Accept-Encoding")
+                if use_gzip:
+                    self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Length", str(len(body_bytes)))
                 self.end_headers()
-                self.wfile.write(html)
+                self.wfile.write(body_bytes)
                 return
 
             if path == "/api/status":

@@ -30,7 +30,12 @@ from drivers.raw_frame_driver import RawFrameDriver
 from drivers.stock_driver import StockFirmwareDriver
 from hub.claude_usage import CLAUDE_USAGE_PATH as CLAUDE_RATE_LIMITS_PATH, read_claude_usage
 from hub.desktop_notify_watcher import VALID_POKEMON, DesktopNotifyWatcher
-from hub.render_engine import BACKEND_NAME, render_svg_to_full_and_strip, render_svg_to_jpg
+from hub.render_engine import (
+    BACKEND_NAME,
+    render_svg_to_full_and_strip,
+    render_svg_to_jpg,
+    render_svg_to_strip,
+)
 from hub.spotify_watcher import SpotifyWatcher, query_spotify_playing
 from screens import (
     ANIM_STRIP_H,
@@ -114,8 +119,72 @@ _GEMINI_FILE_CACHE: dict[str, tuple[int, int, dict]] = {}
 _CLAUDE_CACHE_LOCK = threading.Lock()
 # Maps realpath -> (st_mtime_ns, st_size, parsed_cost_state)
 _CLAUDE_FILE_CACHE: dict[str, tuple[int, int, dict | None]] = {}
+_CACHE_MISS = object()
 
 _CLAUDE_RETENTION_S = 8 * 86400
+
+
+def _iter_gemini_transcript_files() -> set[str]:
+    """Fast file discovery for Gemini transcript.jsonl files using os.scandir when possible."""
+    files: set[str] = set()
+    sep_star_sep = f"{os.sep}*{os.sep}"
+    for pattern in TRANSCRIPT_GLOBS:
+        if pattern.count("*") == 1 and sep_star_sep in pattern and "?" not in pattern and "[" not in pattern:
+            base, rel_suffix = pattern.split(sep_star_sep, 1)
+            if not os.path.isdir(base):
+                continue
+            real_base = os.path.realpath(base)
+            try:
+                with os.scandir(real_base) as it:
+                    for entry in it:
+                        try:
+                            if not entry.is_dir(follow_symlinks=True):
+                                continue
+                            candidate = os.path.join(entry.path, rel_suffix)
+                            if entry.is_symlink():
+                                candidate = os.path.realpath(candidate)
+                            if os.path.isfile(candidate):
+                                files.add(candidate)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        else:
+            for path in glob.glob(pattern):
+                files.add(os.path.realpath(path))
+    return files
+
+
+def _iter_claude_jsonl_files() -> set[str]:
+    """Fast recursive discovery for Claude Code session JSONL files using os.scandir."""
+    files: set[str] = set()
+    rec_token = f"{os.sep}**{os.sep}*.jsonl"
+    if CLAUDE_PROJECT_GLOB.endswith(rec_token):
+        base = CLAUDE_PROJECT_GLOB[: -len(rec_token)]
+        if not os.path.isdir(base):
+            return files
+        real_base = os.path.realpath(base)
+        stack = [real_base]
+        while stack:
+            cur = stack.pop()
+            try:
+                with os.scandir(cur) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                stack.append(entry.path)
+                            elif entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=True):
+                                path = os.path.realpath(entry.path) if entry.is_symlink() else entry.path
+                                files.add(path)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return files
+
+    for path in glob.glob(CLAUDE_PROJECT_GLOB, recursive=True):
+        files.add(os.path.realpath(path))
+    return files
 
 
 def discover_device_ipv4(hostname: str = DEVICE_MDNS_HOSTNAME, timeout: float = 2.0) -> str | None:
@@ -237,6 +306,9 @@ def _parse_gemini_file(path: str, local_tz, tz_offset) -> dict:
 
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
+            has_tokens = '"input_tokens"' in line or '"output_tokens"' in line
+            if not has_tokens and "error" not in line and "ERROR" not in line and "Error" not in line:
+                continue
             stripped = line.strip()
             if not stripped:
                 continue
@@ -277,7 +349,7 @@ def _parse_gemini_file(path: str, local_tz, tz_offset) -> dict:
                         dur = _parse_quota_reset_seconds(err_text)
                         quota_reset_at_ts = (err_ts + dur) if dur is not None else None
 
-            if '"input_tokens"' not in line and '"output_tokens"' not in line:
+            if not has_tokens:
                 continue
             it = int(rec.get("input_tokens") or 0)
             ot = int(rec.get("output_tokens") or 0)
@@ -342,10 +414,7 @@ def collect_gemini_usage() -> dict:
     latest_quota_reset_at_ts: float | None = None
     latest_success_ts: float | None = None
 
-    files: set[str] = set()
-    for pattern in TRANSCRIPT_GLOBS:
-        for path in glob.glob(pattern):
-            files.add(os.path.realpath(path))
+    files = _iter_gemini_transcript_files()
 
     with _GEMINI_CACHE_LOCK:
         stale = [k for k in _GEMINI_FILE_CACHE if k not in files]
@@ -550,6 +619,8 @@ def _parse_claude_file(path: str, local_tz) -> dict | None:
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
+                if '"cost-state"' not in line:
+                    continue
                 stripped = line.strip()
                 if not stripped:
                     continue
@@ -582,10 +653,7 @@ def collect_claude_usage() -> dict:
     daily_total: dict = defaultdict(int)
     today_in = today_out = today_cache = today_steps = 0
     today_sessions: set[str] = set()
-    files: set[str] = set()
-    for path in glob.glob(CLAUDE_PROJECT_GLOB, recursive=True):
-        rp = os.path.realpath(path)
-        files.add(rp)
+    files = _iter_claude_jsonl_files()
 
     with _CLAUDE_CACHE_LOCK:
         stale = [k for k in _CLAUDE_FILE_CACHE if k not in files]
@@ -605,18 +673,18 @@ def collect_claude_usage() -> dict:
                 _CLAUDE_FILE_CACHE.pop(path, None)
             continue
 
-        cost_state = None
+        cost_state: object = _CACHE_MISS
         with _CLAUDE_CACHE_LOCK:
             cached = _CLAUDE_FILE_CACHE.get(path)
             if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
                 cost_state = cached[2]
 
-        if cost_state is None:
+        if cost_state is _CACHE_MISS:
             cost_state = _parse_claude_file(path, local_tz)
             with _CLAUDE_CACHE_LOCK:
                 _CLAUDE_FILE_CACHE[path] = (st.st_mtime_ns, st.st_size, cost_state)
 
-        if cost_state is None:
+        if not isinstance(cost_state, dict):
             continue
 
         # startTime is in milliseconds
@@ -1494,13 +1562,40 @@ class PokeHubEngine:
 
     def get_preview_with_etag(self, card: str) -> tuple[bytes, str]:
         card_key = (card or "").strip().lower()
+        lazy_render: tuple[str, int, int, str, str] | None = None
         with self._lock:
-            if card_key == "active":
+            is_active_req = card_key == "active"
+            if is_active_req:
                 card_key = self.active_card
-            item = self._jpg_cache.get(card_key)
-            if item is not None:
-                return item[1], item[0]
-            snapshot = self._snapshot_for_render_locked(card_key)
+                frames = self._anim_cache.get(card_key)
+                if frames:
+                    idx = self._anim_idx % len(frames)
+                    frame = frames[idx]
+                    if frame.get("full") is not None:
+                        return frame["full"], frame["hash"]
+                    svg = frame.get("svg")
+                    bg_hex = frame.get("bg_hex") or "#F8F8F0"
+                    if svg:
+                        lazy_render = (card_key, self._card_gen.get(card_key, 0), idx, svg, bg_hex)
+            if lazy_render is None:
+                item = self._jpg_cache.get(card_key)
+                if item is not None:
+                    return item[1], item[0]
+                snapshot = self._snapshot_for_render_locked(card_key)
+            else:
+                snapshot = None
+
+        if lazy_render is not None:
+            c_key, gen, idx, svg, bg_hex = lazy_render
+            full_jpg = render_svg_to_jpg(svg, bg_hex=bg_hex)
+            full_hash = _sha256(full_jpg)
+            with self._lock:
+                frames = self._anim_cache.get(c_key)
+                if frames and self._card_gen.get(c_key, 0) == gen and idx < len(frames):
+                    frames[idx]["full"] = full_jpg
+                    frames[idx]["hash"] = full_hash
+                    self._jpg_cache[c_key] = (full_hash, full_jpg)
+            return full_jpg, full_hash
 
         if snapshot is None:
             return b"", ""
@@ -1634,7 +1729,7 @@ class PokeHubEngine:
 
     @staticmethod
     def _anim_interval(card: str) -> float:
-        return 0.35 if card == "spotify" else 0.65
+        return 0.35 if card == "spotify" else 0.85
 
     def _invalidate_cards_locked(self, *cards: str) -> None:
         targets = cards or ("clock", "weather", "gemini", "claude", "spotify", "notify")
@@ -1752,26 +1847,59 @@ class PokeHubEngine:
                 return None
             svgs.append(svg)
 
-        if len(svgs) == 1 or BACKEND_NAME == "in_memory" or self._render_pool is None:
-            rendered = [render_svg_to_full_and_strip(svg, bg_hex=bg_hex) for svg in svgs]
-        else:
-            try:
-                rendered = list(
-                    self._render_pool.map(
-                        lambda s: render_svg_to_full_and_strip(s, bg_hex=bg_hex),
-                        svgs,
-                    )
-                )
-            except RuntimeError:
-                rendered = [render_svg_to_full_and_strip(svg, bg_hex=bg_hex) for svg in svgs]
+        if len(svgs) == 1:
+            full_jpg, strip_jpg = render_svg_to_full_and_strip(svgs[0], bg_hex=bg_hex)
+            frames = [{
+                "hash": _sha256(full_jpg),
+                "full": full_jpg,
+                "strip_hash": _sha256(strip_jpg),
+                "strip": strip_jpg,
+                "svg": svgs[0],
+                "bg_hex": bg_hex,
+            }]
+            return frames, snapshot.get("gemini_stats"), snapshot.get("claude_stats")
 
-        frames: list[dict] = []
-        for full_jpg, strip_jpg in rendered:
+        if BACKEND_NAME == "in_memory" or self._render_pool is None:
+            full0, strip0 = render_svg_to_full_and_strip(svgs[0], bg_hex=bg_hex)
+            frames = [{
+                "hash": _sha256(full0),
+                "full": full0,
+                "strip_hash": _sha256(strip0),
+                "strip": strip0,
+                "svg": svgs[0],
+                "bg_hex": bg_hex,
+            }]
+            for svg in svgs[1:]:
+                strip_jpg = render_svg_to_strip(svg, bg_hex=bg_hex)
+                frames.append({
+                    "hash": "",
+                    "full": None,
+                    "strip_hash": _sha256(strip_jpg),
+                    "strip": strip_jpg,
+                    "svg": svg,
+                    "bg_hex": bg_hex,
+                })
+            return frames, snapshot.get("gemini_stats"), snapshot.get("claude_stats")
+
+        try:
+            rendered = list(
+                self._render_pool.map(
+                    lambda s: render_svg_to_full_and_strip(s, bg_hex=bg_hex),
+                    svgs,
+                )
+            )
+        except RuntimeError:
+            rendered = [render_svg_to_full_and_strip(svg, bg_hex=bg_hex) for svg in svgs]
+
+        frames = []
+        for idx, (full_jpg, strip_jpg) in enumerate(rendered):
             frames.append({
                 "hash": _sha256(full_jpg),
                 "full": full_jpg,
                 "strip_hash": _sha256(strip_jpg),
                 "strip": strip_jpg,
+                "svg": svgs[idx],
+                "bg_hex": bg_hex,
             })
         return frames, snapshot.get("gemini_stats"), snapshot.get("claude_stats")
 
@@ -1938,9 +2066,11 @@ class PokeHubEngine:
                     self._anim_idx = (self._anim_idx + 1) % len(frames)
                     frame = frames[self._anim_idx]
 
-                self._jpg_cache[card] = (frame["hash"], frame["full"])
-                if frame["hash"] != self._last_active_frame_hash or card != prev_card:
-                    self._last_active_frame_hash = frame["hash"]
+                frame_sig = frame["hash"] or frame["strip_hash"]
+                if frame["full"] is not None:
+                    self._jpg_cache[card] = (frame["hash"], frame["full"])
+                if frame_sig != self._last_active_frame_hash or card != prev_card:
+                    self._last_active_frame_hash = frame_sig
                     self._frame_seq += 1
 
                 if not reset_backoff and now_mono < self._next_push_retry_mono:
@@ -1960,10 +2090,17 @@ class PokeHubEngine:
 
         try:
             if need_full:
-                res = drv.push_frame(card, frame["full"], frame["hash"], force=force)
+                full_bytes = frame["full"]
+                full_hash = frame["hash"]
+                if full_bytes is None:
+                    full_bytes = render_svg_to_jpg(frame["svg"], bg_hex=frame.get("bg_hex", "#F8F8F0"))
+                    full_hash = _sha256(full_bytes)
+                    frame["full"] = full_bytes
+                    frame["hash"] = full_hash
+                res = drv.push_frame(card, full_bytes, full_hash, force=force)
                 if not res.get("skipped"):
                     print(
-                        f"[push] {card} ({reason}) -> {len(frame['full'])}B in {res.get('pc_ms', '?')}ms "
+                        f"[push] {card} ({reason}) -> {len(full_bytes)}B in {res.get('pc_ms', '?')}ms "
                         f"(esp={res.get('ms', '?')}ms)",
                         flush=True,
                     )
@@ -1979,7 +2116,14 @@ class PokeHubEngine:
                     self._offline_failures = 0
                     self._next_push_retry_mono = 0.0
             else:
-                res = drv.push_frame(card, frame["full"], frame["hash"], force=False)
+                full_bytes = frame["full"]
+                full_hash = frame["hash"]
+                if full_bytes is None:
+                    full_bytes = render_svg_to_jpg(frame["svg"], bg_hex=frame.get("bg_hex", "#F8F8F0"))
+                    full_hash = _sha256(full_bytes)
+                    frame["full"] = full_bytes
+                    frame["hash"] = full_hash
+                res = drv.push_frame(card, full_bytes, full_hash, force=False)
                 with self._lock:
                     self._last_anim_ts = time.monotonic()
                     self._offline_failures = 0
@@ -1988,7 +2132,10 @@ class PokeHubEngine:
         except Exception as exc:
             if "HTTP 423" in str(exc):
                 with self._lock:
+                    display_is_on = self._display_on
                     pending_wake = self._pending_startup_display_on
+                if not display_is_on:
+                    return {"ok": True, "display_on": False, "skipped": True}
                 if pending_wake and not self._stop.is_set():
                     _, woke = self._sync_device_status(drv)
                     if woke:
@@ -2099,8 +2246,6 @@ class PokeHubEngine:
 
                 if cur_hm != self._last_clock_hm:
                     self._last_clock_hm = cur_hm
-                    self._last_gemini_ts = 0.0
-                    self._last_claude_ts = 0.0
                     self._invalidate_cards_locked("clock")
                     if self.active_card == "clock" and self.config["enabled_cards"].get("clock", True):
                         snap_clock = self._snapshot_for_render_locked("clock")

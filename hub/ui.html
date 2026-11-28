@@ -3109,12 +3109,12 @@ $('yellowDuckMic').addEventListener('click', toggleYellowDuckVoice);
 $('yellowDuckClear').addEventListener('click', clearYellowDuckConversation);
 refresh(true).then(() => schedulePoll(pollDelayMs));
 
-// Live animation preview cadence (~700ms only when animations are active, guarded against overlap)
+// Live animation preview cadence (~850ms only when animations & display are active)
 setInterval(() => {
-  if (!document.hidden && state.animations && !previewInFlight) {
+  if (!document.hidden && state.animations && state.displayOn !== false && !previewInFlight) {
     updatePreviewImg(false);
   }
-}, 700);
+}, 850);
 </script>
 </body>
 </html>

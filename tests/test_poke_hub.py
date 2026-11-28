@@ -1146,6 +1146,65 @@ class TestPokeHub(unittest.TestCase):
             self.assertFalse(engine._rediscover_device("192.168.18.20"))
         self.assertEqual(engine.config["host"], "192.168.18.20")
 
+    def test_collect_claude_usage_caches_files_without_cost_state(self) -> None:
+        proj_dir = Path(self.tmp.name) / "claude-proj"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        empty_session = proj_dir / "session-no-cost.jsonl"
+        empty_session.write_text('{"type":"user","message":"hola"}\n', encoding="utf-8")
+
+        glob_pattern = str(Path(self.tmp.name) / "**" / "*.jsonl")
+        with state_engine._CLAUDE_CACHE_LOCK:
+            state_engine._CLAUDE_FILE_CACHE.clear()
+
+        with (
+            mock.patch.object(state_engine, "CLAUDE_PROJECT_GLOB", glob_pattern),
+            mock.patch("hub.state_engine._parse_claude_file", wraps=state_engine._parse_claude_file) as parse_spy,
+        ):
+            collect_claude_usage()
+            self.assertEqual(parse_spy.call_count, 1)
+            collect_claude_usage()
+            self.assertEqual(parse_spy.call_count, 1)
+
+    def test_ui_html_supports_gzip_and_etag_304(self) -> None:
+        import gzip
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.engine))
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/",
+                headers={"Accept-Encoding": "gzip"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers.get("Content-Encoding"), "gzip")
+                etag = resp.headers.get("ETag")
+                self.assertTrue(etag)
+                raw = gzip.decompress(resp.read())
+                self.assertIn(b"<!doctype html>", raw[:100].lower())
+
+            req_304 = urllib.request.Request(
+                f"http://127.0.0.1:{port}/",
+                headers={"If-None-Match": etag, "Accept-Encoding": "gzip"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req_304, timeout=5)
+            self.assertEqual(ctx.exception.code, 304)
+            ctx.exception.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_render_svg_to_strip_produces_valid_jpeg(self) -> None:
+        from hub.render_engine import render_svg_to_strip
+
+        svg = build_clock_svg(datetime(2026, 11, 22, 14, 30), self.engine.config, self.engine.weather_data, anim_frame=1)
+        strip_jpg = render_svg_to_strip(svg)
+        self.assertTrue(strip_jpg.startswith(b"\xff\xd8\xff"))
+        self.assertLess(len(strip_jpg), 23500)
+
 
 if __name__ == "__main__":
     unittest.main()
