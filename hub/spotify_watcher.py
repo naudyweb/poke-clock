@@ -1,4 +1,4 @@
-"""Event-driven MPRIS Spotify watcher using native dbus-monitor + busctl."""
+"""Event-driven MPRIS Spotify watcher using native D-Bus (Gio in-process + dbus-monitor)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,19 @@ import subprocess
 import threading
 import time
 from typing import Callable
+
+try:
+    import gi
+
+    gi.require_version("Gio", "2.0")
+    gi.require_version("GLib", "2.0")
+    from gi.repository import Gio, GLib  # type: ignore
+
+    _HAS_GIO = True
+except Exception:
+    Gio = None  # type: ignore
+    GLib = None  # type: ignore
+    _HAS_GIO = False
 
 
 def _busctl_json(args: list[str]) -> dict | list | None:
@@ -24,12 +37,101 @@ def _busctl_json(args: list[str]) -> dict | list | None:
         return None
 
 
+def _extract_spotify_track_from_plain_meta(dest: str, meta: dict) -> dict | None:
+    def get_str(k: str) -> str:
+        v = meta.get(k)
+        if isinstance(v, (list, tuple)):
+            return ", ".join(str(x) for x in v if x)
+        return str(v or "")
+
+    is_native = "spotify" in dest.lower()
+    url = get_str("xesam:url").lower()
+    art = get_str("mpris:artUrl").lower()
+    trackid = get_str("mpris:trackid").lower()
+    is_web = ("spotify.com" in url) or ("scdn.co" in art) or ("spotify" in trackid)
+    if not (is_native or is_web):
+        return None
+
+    title = get_str("xesam:title").strip()
+    artist = get_str("xesam:artist").strip()
+    album = get_str("xesam:album").strip()
+    if not title and not artist:
+        return None
+    return {"title": title, "artist": artist, "album": album}
+
+
+def _query_spotify_playing_gio() -> tuple[bool, dict | None]:
+    if not _HAS_GIO:
+        return False, None
+    try:
+        conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        names_var = conn.call_sync(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "ListNames",
+            None,
+            GLib.VariantType.new("(as)"),
+            Gio.DBusCallFlags.NONE,
+            1500,
+            None,
+        )
+        all_names = names_var.unpack()[0]
+    except Exception:
+        return False, None
+
+    mpris_players = [n for n in all_names if isinstance(n, str) and n.startswith("org.mpris.MediaPlayer2.")]
+    mpris_players.sort(key=lambda n: (0 if "spotify" in n.lower() else 1, n))
+
+    for dest in mpris_players:
+        try:
+            status_var = conn.call_sync(
+                dest,
+                "/org/mpris/MediaPlayer2",
+                "org.freedesktop.DBus.Properties",
+                "Get",
+                GLib.Variant("(ss)", ("org.mpris.MediaPlayer2.Player", "PlaybackStatus")),
+                GLib.VariantType.new("(v)"),
+                Gio.DBusCallFlags.NONE,
+                1500,
+                None,
+            )
+            if status_var.unpack()[0] != "Playing":
+                continue
+
+            meta_var = conn.call_sync(
+                dest,
+                "/org/mpris/MediaPlayer2",
+                "org.freedesktop.DBus.Properties",
+                "Get",
+                GLib.Variant("(ss)", ("org.mpris.MediaPlayer2.Player", "Metadata")),
+                GLib.VariantType.new("(v)"),
+                Gio.DBusCallFlags.NONE,
+                1500,
+                None,
+            )
+            meta = meta_var.unpack()[0]
+            if not isinstance(meta, dict):
+                continue
+            track = _extract_spotify_track_from_plain_meta(dest, meta)
+            if track is not None:
+                return True, track
+        except Exception:
+            continue
+    return True, None
+
+
 def query_spotify_playing() -> dict | None:
     """
-    Query MPRIS via busctl for active Spotify playback (native Spotify desktop app
+    Query MPRIS for active Spotify playback (native Spotify desktop app
     or Spotify Web in Brave/Chromium/Firefox).
+    Uses in-process Gio.DBus when available, falling back to busctl.
     Returns {"title", "artist", "album"} ONLY when PlaybackStatus == "Playing".
     """
+    ok, gio_track = _query_spotify_playing_gio()
+    if ok:
+        return gio_track
+
     names_data = _busctl_json(["list"])
     if not isinstance(names_data, list):
         return None
@@ -196,5 +298,5 @@ class SpotifyWatcher:
                     self._stop.wait(2.0)
 
     def _fallback_loop(self) -> None:
-        while not self._stop.wait(20.0):
+        while not self._stop.wait(60.0):
             self._check_now()

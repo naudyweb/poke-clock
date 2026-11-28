@@ -668,15 +668,25 @@ class DesktopNotifyWatcher:
             thread.join(timeout=2.0)
 
     def get_status(self) -> dict:
+        now_m = time.monotonic()
         with self._lock:
             running = self._running
             backend = self._backend
             received_count = self._received_count
             dropped_dnd_count = self._dropped_dnd_count
+            cached_dnd = getattr(self, "_dnd_cache_val", None)
+            cached_ts = getattr(self, "_dnd_cache_ts", 0.0)
+        if cached_dnd is None or (now_m - cached_ts) >= 2.5:
+            dnd_active = is_system_dnd_active()
+            with self._lock:
+                self._dnd_cache_val = dnd_active
+                self._dnd_cache_ts = now_m
+        else:
+            dnd_active = cached_dnd
         return {
             "running": running,
             "backend": backend,
-            "dnd_active": is_system_dnd_active(),
+            "dnd_active": dnd_active,
             "received_count": received_count,
             "dropped_dnd_count": dropped_dnd_count,
         }

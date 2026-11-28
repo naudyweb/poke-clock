@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 import time
 import urllib.parse
@@ -46,6 +47,15 @@ class RawFrameDriver(DisplayDriver):
                 self._conn = http.client.HTTPConnection(self.host, 80, timeout=self.timeout)
         return self._conn
 
+    @staticmethod
+    def _configure_nodelay(conn: http.client.HTTPConnection) -> None:
+        sock = conn.sock
+        if sock is not None:
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+
     def _close_conn(self) -> None:
         if self._conn is not None:
             try:
@@ -70,6 +80,9 @@ class RawFrameDriver(DisplayDriver):
             for attempt in range(2):
                 conn = self._ensure_conn()
                 try:
+                    if conn.sock is None:
+                        conn.connect()
+                        self._configure_nodelay(conn)
                     conn.request(method, path, body=body, headers=headers)
                     resp = conn.getresponse()
                     data = resp.read()

@@ -249,6 +249,88 @@ class TestPokeHub(unittest.TestCase):
 
         self.assertEqual(calls, [("display", False)])
 
+    def test_startup_wakes_sleeping_display_immediately(self) -> None:
+        self.driver.display_on = False
+        self.engine._display_on = True
+
+        st, woke = self.engine._sync_device_status(self.driver)
+
+        self.assertTrue(woke)
+        self.assertTrue(st["display_on"])
+        self.assertTrue(self.driver.display_on)
+        self.assertTrue(self.engine._display_on)
+        self.assertFalse(self.engine._pending_startup_display_on)
+
+        res = self.engine._push_now(force=False)
+        self.assertTrue(res["ok"])
+        self.assertGreater(len(self.driver.pushes), 0)
+
+    def test_startup_wakes_sleeping_display_after_initial_offline_boot(self) -> None:
+        self.driver.display_on = False
+        online = False
+
+        def flaky_status() -> dict:
+            if not online:
+                return {"online": False, "driver": self.driver.name, "error": "[Errno 101] Network is unreachable"}
+            return {
+                "online": True,
+                "driver": self.driver.name,
+                "frames": len(self.driver.pushes),
+                "display_on": self.driver.display_on,
+            }
+
+        self.driver.get_status = flaky_status  # type: ignore[method-assign]
+
+        # Boot before Wi-Fi is up: pending wake must stay armed
+        st_offline, woke_offline = self.engine._sync_device_status(self.driver)
+        self.assertFalse(st_offline["online"])
+        self.assertFalse(woke_offline)
+        self.assertTrue(self.engine._pending_startup_display_on)
+
+        # Wi-Fi connects and ESP8266 still reports display_on=False from previous shutdown
+        online = True
+        st_online, woke_online = self.engine._sync_device_status(self.driver)
+        self.assertTrue(st_online["online"])
+        self.assertTrue(woke_online)
+        self.assertTrue(self.driver.display_on)
+        self.assertTrue(self.engine._display_on)
+        self.assertFalse(self.engine._pending_startup_display_on)
+
+    def test_manual_display_off_is_not_overridden_by_health_check(self) -> None:
+        off = self.engine.set_display_power(False)
+        self.assertTrue(off["ok"])
+        self.assertFalse(self.driver.display_on)
+        self.assertFalse(self.engine._pending_startup_display_on)
+
+        st, woke = self.engine._sync_device_status(self.driver)
+        self.assertFalse(woke)
+        self.assertFalse(st["display_on"])
+        self.assertFalse(self.driver.display_on)
+        self.assertFalse(self.engine._display_on)
+
+    def test_push_http_423_wakes_display_only_during_pending_startup(self) -> None:
+        self.driver.display_on = False
+        orig_push = self.driver.push_frame
+
+        def guarded_push(card_id: str, jpg_bytes: bytes, content_hash: str, force: bool = False) -> dict:
+            if not self.driver.display_on:
+                raise RuntimeError("HTTP 423 ")
+            return orig_push(card_id, jpg_bytes, content_hash, force=force)
+
+        self.driver.push_frame = guarded_push  # type: ignore[method-assign]
+
+        res = self.engine._push_now(force=False)
+        self.assertTrue(res["ok"])
+        self.assertTrue(self.driver.display_on)
+        self.assertFalse(self.engine._pending_startup_display_on)
+        self.assertEqual(len(self.driver.pushes), 1)
+
+        # After startup wake is complete, an HTTP 423 must not auto-wake the display
+        self.driver.display_on = False
+        res2 = self.engine._push_now(force=True)
+        self.assertFalse(res2["ok"])
+        self.assertFalse(self.driver.display_on)
+
     def test_mdns_publisher_url_formatting_and_status(self) -> None:
         pub = MdnsPublisher(domain="pokeclock", port=8765)
         self.assertEqual(pub.domain, "pokeclock.local")
@@ -997,6 +1079,131 @@ class TestPokeHub(unittest.TestCase):
             self.assertTrue(self.engine.gemini_stats["out_of_tokens"])
             self.engine.update_config({"gemini_daily_limit": 0})
             self.assertFalse(self.engine.gemini_stats["out_of_tokens"])
+
+    def test_discover_device_ipv4_parses_avahi_output(self) -> None:
+        from hub.state_engine import discover_device_ipv4
+
+        ok_proc = mock.Mock(returncode=0, stdout="poke-display.local\t192.168.18.20\n")
+        with (
+            mock.patch("hub.state_engine.shutil.which", return_value="/usr/bin/avahi-resolve"),
+            mock.patch("hub.state_engine.subprocess.run", return_value=ok_proc),
+        ):
+            self.assertEqual(discover_device_ipv4(), "192.168.18.20")
+
+        loopback_proc = mock.Mock(returncode=0, stdout="poke-display.local\t127.0.0.1\n")
+        with (
+            mock.patch("hub.state_engine.shutil.which", return_value="/usr/bin/avahi-resolve"),
+            mock.patch("hub.state_engine.subprocess.run", return_value=loopback_proc),
+        ):
+            self.assertIsNone(discover_device_ipv4())
+
+        fail_proc = mock.Mock(returncode=1, stdout="")
+        with (
+            mock.patch("hub.state_engine.shutil.which", return_value="/usr/bin/avahi-resolve"),
+            mock.patch("hub.state_engine.subprocess.run", return_value=fail_proc),
+        ):
+            self.assertIsNone(discover_device_ipv4())
+
+    def test_rediscover_device_updates_host_and_persists_config(self) -> None:
+        cfg_path = Path(self.tmp.name) / "rediscover-config.json"
+        cfg_path.write_text(json.dumps({"host": "192.168.18.26"}), encoding="utf-8")
+        engine = PokeHubEngine(config_path=cfg_path, start_watchers=False)
+        self.assertEqual(engine.config["host"], "192.168.18.26")
+
+        class FakeCandidate(RawFrameDriver):
+            def ping(self) -> bool:
+                return self.host == "192.168.18.20"
+
+            def get_status(self) -> dict:
+                return {"online": True, "device": "poke-display", "display_on": True, "frames": 0}
+
+            def set_brightness(self, level: int) -> bool:
+                return True
+
+            def set_rotation(self, rotation: int) -> bool:
+                return True
+
+            def sync_offline_config(self, *args, **kwargs) -> bool:
+                return True
+
+        with (
+            mock.patch("hub.state_engine.discover_device_ipv4", return_value="192.168.18.20"),
+            mock.patch("hub.state_engine.RawFrameDriver", FakeCandidate),
+        ):
+            switched = engine._rediscover_device("192.168.18.26")
+
+        self.assertTrue(switched)
+        self.assertEqual(engine.config["host"], "192.168.18.20")
+        self.assertEqual(engine.driver.host, "192.168.18.20")
+        saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["host"], "192.168.18.20")
+
+        # Should not switch if candidate ping fails
+        with (
+            mock.patch("hub.state_engine.discover_device_ipv4", return_value="192.168.18.99"),
+            mock.patch("hub.state_engine.RawFrameDriver", FakeCandidate),
+        ):
+            self.assertFalse(engine._rediscover_device("192.168.18.20"))
+        self.assertEqual(engine.config["host"], "192.168.18.20")
+
+    def test_collect_claude_usage_caches_files_without_cost_state(self) -> None:
+        proj_dir = Path(self.tmp.name) / "claude-proj"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        empty_session = proj_dir / "session-no-cost.jsonl"
+        empty_session.write_text('{"type":"user","message":"hola"}\n', encoding="utf-8")
+
+        glob_pattern = str(Path(self.tmp.name) / "**" / "*.jsonl")
+        with state_engine._CLAUDE_CACHE_LOCK:
+            state_engine._CLAUDE_FILE_CACHE.clear()
+
+        with (
+            mock.patch.object(state_engine, "CLAUDE_PROJECT_GLOB", glob_pattern),
+            mock.patch("hub.state_engine._parse_claude_file", wraps=state_engine._parse_claude_file) as parse_spy,
+        ):
+            collect_claude_usage()
+            self.assertEqual(parse_spy.call_count, 1)
+            collect_claude_usage()
+            self.assertEqual(parse_spy.call_count, 1)
+
+    def test_ui_html_supports_gzip_and_etag_304(self) -> None:
+        import gzip
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.engine))
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/",
+                headers={"Accept-Encoding": "gzip"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers.get("Content-Encoding"), "gzip")
+                etag = resp.headers.get("ETag")
+                self.assertTrue(etag)
+                raw = gzip.decompress(resp.read())
+                self.assertIn(b"<!doctype html>", raw[:100].lower())
+
+            req_304 = urllib.request.Request(
+                f"http://127.0.0.1:{port}/",
+                headers={"If-None-Match": etag, "Accept-Encoding": "gzip"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req_304, timeout=5)
+            self.assertEqual(ctx.exception.code, 304)
+            ctx.exception.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_render_svg_to_strip_produces_valid_jpeg(self) -> None:
+        from hub.render_engine import render_svg_to_strip
+
+        svg = build_clock_svg(datetime(2026, 11, 22, 14, 30), self.engine.config, self.engine.weather_data, anim_frame=1)
+        strip_jpg = render_svg_to_strip(svg)
+        self.assertTrue(strip_jpg.startswith(b"\xff\xd8\xff"))
+        self.assertLess(len(strip_jpg), 23500)
 
 
 if __name__ == "__main__":
