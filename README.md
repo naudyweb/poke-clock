@@ -28,13 +28,7 @@ poke-ctl toggle spotify_priority on
     sudo ./scripts/setup-domain.sh
     ```
 - También disponible siempre en **`http://localhost:8765/`** (o `http://192.168.18.27:8765/`).
-- Endpoints JSON: `GET /api/status`, `GET /api/preview/<card>`, `POST /api/show`, `POST /api/auto`, `POST /api/notify`, `POST /api/config`, `POST /api/brightness`, `POST /api/display` (ej. `{"on": false}`), `POST /api/rotation`, `POST /api/refresh`, `POST /api/yellow-duck`.
-
-## Yellow Duck con Psyduck
-
-La pestaña **Psyduck** permite conversar por texto con Gemini usando la técnica del patito amarillo. El dictado y la lectura de respuestas son opcionales y dependen del navegador; el texto dictado se puede revisar antes de enviarlo. La conversación se conserva solo en la pestaña abierta y Poké-Hub no la guarda.
-
-Para responder, el proceso de `poke-clock.service` debe tener `GEMINI_API_KEY` en su entorno. La clave permanece en el hub y no se envía al navegador. Sin ella, la interfaz indica cómo corregir la configuración. Las solicitudes al endpoint son del mismo origen y se limitan a 8 por minuto por cliente.
+- Endpoints JSON: `GET /api/status`, `GET /api/preview/<card>`, `POST /api/show`, `POST /api/auto`, `POST /api/notify`, `POST /api/config`, `POST /api/brightness`, `POST /api/display` (ej. `{"on": false}`), `POST /api/rotation`, `POST /api/refresh`.
 
 ## Cuota real de Claude Code
 
